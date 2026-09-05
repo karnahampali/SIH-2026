@@ -211,8 +211,8 @@ class _IssuanceFormScreenState extends ConsumerState<IssuanceFormScreen> {
   Widget _sectionHeader(String title) {
     return Row(
       children: [
-        Container(width: 4, height: 18, color: PramaanColors.steelBlue,
-          decoration: BoxDecoration(borderRadius: BorderRadius.circular(2))),
+        Container(width: 4, height: 18, 
+          decoration: BoxDecoration(color: PramaanColors.steelBlue, borderRadius: BorderRadius.circular(2))),
         const SizedBox(width: 10),
         Text(
           title.toUpperCase(),
