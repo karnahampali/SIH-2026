@@ -20,9 +20,20 @@ class CheckpointResultScreen extends StatelessWidget {
 
     final apiResult = result as Map<String, dynamic>;
     final parsedDoc = apiResult['document'] ?? {};
-    final tamperData = apiResult['tamper_detection'] ?? {};
-    
-    final bool isTampered = tamperData['overall_verdict'] == 'TAMPERED';
+    final docType = parsedDoc['document_type'] ?? 'Unknown';
+
+    final elaData = apiResult['tamper_detection'] ?? {};
+    final dlData = apiResult['dl_tamper'] ?? {};
+    final noiseData = apiResult['noise_analysis'] ?? {};
+    final copyMoveData = apiResult['copy_move'] ?? {};
+
+    final bool isElaTampered = elaData['is_tampered'] == true;
+    final bool isDlTampered = dlData['prediction'] == 1;
+    final bool isNoiseTampered = noiseData['is_tampered'] == true;
+    final bool isCopyMoveTampered = copyMoveData['is_copymove'] == true;
+    final bool isForeignId = docType != 'aadhaar' && docType != 'pan';
+
+    final bool isTampered = isElaTampered || isDlTampered || isNoiseTampered || isCopyMoveTampered || isForeignId;
     final verdict = isTampered ? 'FAIL' : 'PASS';
 
     Color verdictColor = isTampered ? PramaanColors.riskHigh : PramaanColors.pass;
@@ -32,7 +43,6 @@ class CheckpointResultScreen extends StatelessWidget {
     final riskScore = isTampered ? 85 : 15;
 
     final fields = parsedDoc['fields'] ?? {};
-    final docType = parsedDoc['document_type'] ?? 'Unknown';
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A0E1A),
@@ -154,10 +164,23 @@ class CheckpointResultScreen extends StatelessWidget {
                 style: GoogleFonts.rajdhani(
                     fontSize: 18, color: Colors.white54, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-            if (isTampered)
-               _alertCard('Document manipulation detected (ELA / Forensic analysis)', true)
-            else 
-               _alertCard('No pixel manipulation detected', false),
+            if (isElaTampered)
+               _alertCard('Document manipulation detected (ELA analysis)', true),
+            if (isDlTampered)
+               _alertCard('Fake document detected (Deep Learning)', true),
+            if (isNoiseTampered)
+               _alertCard('Inconsistent noise patterns (Splicing)', true),
+            if (isCopyMoveTampered)
+               _alertCard('Copy-move forgery detected', true),
+            if (isForeignId)
+               _alertCard('Invalid Document: Must be an Indian Aadhaar or PAN card', true),
+
+            if (!isElaTampered && !isCopyMoveTampered) 
+               _alertCard('No pixel manipulation detected (ELA / Copy-Move)', false),
+            if (!isDlTampered && !isForeignId)
+               _alertCard('Authentic document structure (Deep Learning)', false),
+            if (!isNoiseTampered)
+               _alertCard('Consistent noise patterns', false),
                
             _alertCard('Quality Gate Passed (Blur / Glare check ok)', false),
 

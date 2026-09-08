@@ -62,6 +62,15 @@ DRIVERS_LICENSE_PATTERNS = {
     "class": r"\b(?:CLASS)[:\s]*([A-Z])\b",
 }
 
+# Spanish DNI
+SPANISH_DNI_PATTERNS = {
+    "dni_number": r"\b(\d{8}[A-Z])\b",
+    "name": r"(?:NOMBRE)[:\s]*([A-Za-z\s]+?)(?:\n|$)",
+    "surname": r"(?:APELLIDOS|PRIMER APELLIDO)[:\s]*([A-Za-z\s]+?)(?:\n|$)",
+    "dob": r"(?:FECHA DE NACIMIENTO|NACIMIENTO)[:\s]*(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})\b",
+    "sex": r"(?:SEXO)[:\s]*([MF])\b",
+}
+
 # Generic patterns that work across document types
 GENERIC_PATTERNS = {
     "name": r"(?:Name|NAME)[:\s]*([A-Za-z\s\.]+?)(?:\n|$)",
@@ -78,6 +87,7 @@ DOC_TYPE_KEYWORDS = {
     "pan": ["income tax", "permanent account", "pan card", "govt of india"],
     "drivers_license": ["driver", "license", "driving", "motor vehicle", "dmv"],
     "passport": ["passport", "republic of india", "nationality"],
+    "spanish_dni": ["españa", "espana", "documento nacional de identidad", "dni"],
 }
 
 
@@ -89,6 +99,7 @@ class FieldParser:
             "aadhaar": AADHAAR_PATTERNS,
             "pan": PAN_PATTERNS,
             "drivers_license": DRIVERS_LICENSE_PATTERNS,
+            "spanish_dni": SPANISH_DNI_PATTERNS,
         }
 
     def parse(self, ocr_result: OCRResult) -> ParsedDocument:
@@ -210,8 +221,12 @@ class FieldParser:
             alpha_ratio = sum(c.isalpha() or c.isspace() for c in text) / max(len(text), 1)
 
             if alpha_ratio > 0.8 and len(text) > 3:
-                keywords = {"name", "dob", "date", "address", "male", "female", "government"}
-                if text.lower() not in keywords:
+                keywords = {
+                    "name", "dob", "date", "address", "male", "female", "government",
+                    "documento", "nacional", "identidad", "republica", "espana", "españa",
+                    "signature", "firma"
+                }
+                if not any(kw in text.lower() for kw in keywords):
                     name_candidates.append(box)
 
         if not name_candidates:
