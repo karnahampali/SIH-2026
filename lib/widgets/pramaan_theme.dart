@@ -3,29 +3,30 @@ import 'package:google_fonts/google_fonts.dart';
 
 // ─── Color Palette ────────────────────────────────────────────────────────────
 class PramaanColors {
-  static const Color navyPrimary = Color(0xFF1B3358);
-  static const Color steelBlue = Color(0xFF2E75B6);
-  static const Color navyDark = Color(0xFF0F1F36);
-  static const Color navyLight = Color(0xFF2A4A70);
-  static const Color accent = Color(0xFFD9822B);
-  static const Color accentLight = Color(0xFFF0A050);
+  // Professional Enterprise Colors
+  static const Color primary = Color(0xFF1976D2); // Standard professional blue
+  static const Color primaryDark = Color(0xFF1565C0);
+  static const Color primaryLight = Color(0xFF42A5F5);
+  
+  static const Color accent = Color(0xFF0288D1); 
+  static const Color accentLight = Color(0xFF03A9F4);
 
   // Risk levels
-  static const Color riskLow = Color(0xFF27AE60);
-  static const Color riskMedium = Color(0xFFF39C12);
-  static const Color riskHigh = Color(0xFFE67E22);
-  static const Color riskCritical = Color(0xFFE74C3C);
+  static const Color riskLow = Color(0xFF2E7D32); // Professional green
+  static const Color riskMedium = Color(0xFFF57F17); // Professional orange/amber
+  static const Color riskHigh = Color(0xFFE65100); 
+  static const Color riskCritical = Color(0xFFC62828); // Professional red
 
-  // Surface colors
-  static const Color surfaceDark = Color(0xFF152840);
-  static const Color surfaceCard = Color(0xFF1E3A56);
-  static const Color surfaceLight = Color(0xFF243F63);
-  static const Color divider = Color(0xFF2E5078);
+  // Surface colors (Light Mode)
+  static const Color surfaceDark = Color(0xFFF5F7FA); // Background
+  static const Color surfaceCard = Color(0xFFFFFFFF); // White cards
+  static const Color surfaceLight = Color(0xFFE8ECEF); // Light grey elements
+  static const Color divider = Color(0xFFE0E0E0); // Clean grey dividers
 
   // Text
-  static const Color textPrimary = Color(0xFFF0F4F8);
-  static const Color textSecondary = Color(0xFFADC4DC);
-  static const Color textMuted = Color(0xFF6A90B0);
+  static const Color textPrimary = Color(0xFF263238); // Dark grey, not pure black
+  static const Color textSecondary = Color(0xFF546E7A); 
+  static const Color textMuted = Color(0xFF90A4AE);
 
   // Status
   static const Color pass = Color(0xFF27AE60);
@@ -91,11 +92,11 @@ class PramaanTheme {
   static ThemeData get theme {
     final base = ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
+      brightness: Brightness.light,
       colorScheme: ColorScheme.fromSeed(
-        seedColor: PramaanColors.steelBlue,
-        brightness: Brightness.dark,
-        primary: PramaanColors.steelBlue,
+        seedColor: PramaanColors.primary,
+        brightness: Brightness.light,
+        primary: PramaanColors.primary,
         secondary: PramaanColors.accent,
         surface: PramaanColors.surfaceDark,
         onSurface: PramaanColors.textPrimary,
@@ -103,17 +104,17 @@ class PramaanTheme {
     );
 
     return base.copyWith(
-      scaffoldBackgroundColor: PramaanColors.navyDark,
+      scaffoldBackgroundColor: PramaanColors.surfaceDark,
       textTheme: _buildTextTheme(base.textTheme),
       appBarTheme: AppBarTheme(
-        backgroundColor: PramaanColors.navyPrimary,
-        foregroundColor: PramaanColors.textPrimary,
+        backgroundColor: PramaanColors.primary,
+        foregroundColor: Colors.white,
         elevation: 0,
         centerTitle: true,
         titleTextStyle: GoogleFonts.rajdhani(
           fontSize: 20,
           fontWeight: FontWeight.w700,
-          color: PramaanColors.textPrimary,
+          color: Colors.white,
           letterSpacing: 2.0,
         ),
       ),
@@ -127,7 +128,7 @@ class PramaanTheme {
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
-          backgroundColor: PramaanColors.steelBlue,
+          backgroundColor: PramaanColors.primary,
           foregroundColor: Colors.white,
           elevation: 2,
           padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
@@ -141,8 +142,8 @@ class PramaanTheme {
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
-          foregroundColor: PramaanColors.steelBlue,
-          side: const BorderSide(color: PramaanColors.steelBlue, width: 1.5),
+          foregroundColor: PramaanColors.primary,
+          side: const BorderSide(color: PramaanColors.primary, width: 1.5),
           padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
@@ -158,7 +159,7 @@ class PramaanTheme {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: PramaanColors.steelBlue, width: 2),
+          borderSide: const BorderSide(color: PramaanColors.primary, width: 2),
         ),
         errorBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),

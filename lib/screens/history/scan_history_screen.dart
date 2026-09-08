@@ -22,7 +22,7 @@ class ScanHistoryScreen extends ConsumerWidget {
     }
 
     return Scaffold(
-      backgroundColor: PramaanColors.navyDark,
+      backgroundColor: PramaanColors.surfaceDark,
       appBar: AppBar(
         title: const Text('SCAN HISTORY'),
         leading: IconButton(

@@ -9,7 +9,7 @@ class AboutScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: PramaanColors.navyDark,
+      backgroundColor: PramaanColors.surfaceDark,
       appBar: AppBar(
         title: const Text('ABOUT PRAMAAN'),
         leading: IconButton(
@@ -29,14 +29,14 @@ class AboutScreen extends StatelessWidget {
                   height: 90,
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
-                      colors: [PramaanColors.steelBlue, PramaanColors.navyPrimary],
+                      colors: [PramaanColors.primary, PramaanColors.primaryDark],
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
                     ),
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: PramaanColors.steelBlue.withOpacity(0.4),
+                        color: PramaanColors.primary.withOpacity(0.4),
                         blurRadius: 20,
                       ),
                     ],
@@ -72,7 +72,7 @@ class AboutScreen extends StatelessWidget {
                     'Smart India Hackathon 2024',
                     style: GoogleFonts.roboto(
                       fontSize: 12,
-                      color: PramaanColors.steelBlue,
+                      color: PramaanColors.primary,
                     ),
                   ),
                 ),
@@ -106,7 +106,7 @@ class AboutScreen extends StatelessWidget {
           _TechCard(
             icon: Icons.key,
             title: 'Ed25519 Digital Signatures',
-            color: PramaanColors.steelBlue,
+            color: PramaanColors.primary,
             description:
                 'Each issued document is signed with an Ed25519 elliptic-curve key pair. '
                 'The signature covers all document fields plus the photo fingerprint — '
@@ -233,7 +233,7 @@ class AboutScreen extends StatelessWidget {
           width: 4,
           height: 18,
           decoration: BoxDecoration(
-            color: PramaanColors.steelBlue,
+            color: PramaanColors.primary,
             borderRadius: BorderRadius.circular(2),
           ),
         ),
@@ -244,7 +244,7 @@ class AboutScreen extends StatelessWidget {
             fontSize: 13,
             fontWeight: FontWeight.w700,
             letterSpacing: 2.0,
-            color: PramaanColors.steelBlue,
+            color: PramaanColors.primary,
           ),
         ),
       ],
@@ -394,7 +394,7 @@ class _StackGrid extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(item.$2, color: PramaanColors.steelBlue, size: 22),
+              Icon(item.$2, color: PramaanColors.primary, size: 22),
               const SizedBox(height: 6),
               Text(
                 item.$1,

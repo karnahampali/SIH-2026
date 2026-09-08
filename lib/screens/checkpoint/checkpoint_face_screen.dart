@@ -1,496 +1,478 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:image_picker/image_picker.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../widgets/pramaan_theme.dart';
+
+enum LivenessState {
+  searching, // Looking for a face
+  eyesOpen,  // Face found, waiting for eyes to be clearly open
+  blinked,   // Eyes closed detected (blink)
+  success    // Eyes opened again after blink
+}
 
 class CheckpointFaceScreen extends StatefulWidget {
   final String documentId;
-  const CheckpointFaceScreen({super.key, required this.documentId});
+  final String ocrText;
+  final String docPhotoPath;
+  final String docunetResult;
+
+  const CheckpointFaceScreen({
+    super.key,
+    required this.documentId,
+    this.ocrText = '',
+    this.docPhotoPath = '',
+    this.docunetResult = '',
+  });
 
   @override
   State<CheckpointFaceScreen> createState() => _CheckpointFaceScreenState();
 }
 
-class _CheckpointFaceScreenState extends State<CheckpointFaceScreen>
-    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
-  CameraController? _controller;
-  bool _initialized = false;
-  bool _capturing = false;
-  bool _livenessComplete = false;
-  int _livenessCountdown = 3;
-  String _livenessPrompt = 'Look directly at the camera';
-  Timer? _livenessTimer;
-  String? _capturedPath;
-  String? _error;
+class _CheckpointFaceScreenState extends State<CheckpointFaceScreen> with SingleTickerProviderStateMixin {
+  CameraController? _camCtrl;
+  bool _camReady = false;
+  String? _camError;
+
+  LivenessState _livenessState = LivenessState.searching;
+  String _instructionText = "Position your face in the oval";
+  bool _isProcessingFrame = false;
+  
+  String? _capturedFacePath;
+  CameraLensDirection _cameraDirection = CameraLensDirection.front;
+
+  final FaceDetector _faceDetector = FaceDetector(
+    options: FaceDetectorOptions(
+      enableClassification: true,
+      performanceMode: FaceDetectorMode.fast, // fast for real-time
+    ),
+  );
 
   late AnimationController _pulseCtrl;
-  late Animation<double> _pulse;
-
-  static const _livenessPrompts = [
-    'Look directly at the camera',
-    'Blink slowly',
-    'Turn your head slightly right',
-    'Look forward again',
-  ];
-  int _promptIndex = 0;
+  late Animation<double> _pulseAnim;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _pulseCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    )..repeat(reverse: true);
-    _pulse = Tween<double>(begin: 1.0, end: 1.08).animate(
-      CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
-    );
-    _initCamera();
-  }
-
-  Future<void> _initCamera() async {
-    try {
-      final cameras = await availableCameras();
-      if (cameras.isEmpty) {
-        setState(() => _error = 'No camera available');
-        return;
-      }
-      final front = cameras.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.front,
-        orElse: () => cameras.first,
-      );
-      _controller = CameraController(
-        front,
-        ResolutionPreset.high,
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.jpeg,
-      );
-      await _controller!.initialize();
-      if (mounted) setState(() => _initialized = true);
-      _startLivenessSequence();
-    } catch (e) {
-      setState(() => _error = 'Camera error: $e');
-    }
-  }
-
-  void _startLivenessSequence() {
-    _livenessTimer = Timer.periodic(const Duration(seconds: 2), (t) {
-      if (!mounted) {
-        t.cancel();
-        return;
-      }
-      setState(() {
-        _promptIndex = (_promptIndex + 1) % _livenessPrompts.length;
-        _livenessPrompt = _livenessPrompts[_promptIndex];
-        if (_livenessCountdown > 0) _livenessCountdown--;
-        if (_livenessCountdown == 0 && !_livenessComplete) {
-          _livenessComplete = true;
-          t.cancel();
-        }
-      });
+    _pulseCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500))..repeat(reverse: true);
+    _pulseAnim = Tween<double>(begin: 0.8, end: 1.1).animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
+    
+    // Crucial: Wait for the previous screen's back camera to fully release its hardware lock
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (mounted) _initCamera();
     });
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.inactive) {
-      _controller?.dispose();
-    } else if (state == AppLifecycleState.resumed) {
-      _initCamera();
+  Future<void> _initCamera() async {
+    final status = await Permission.camera.request();
+    if (!mounted) return;
+    if (status.isDenied || status.isPermanentlyDenied) {
+      setState(() => _camError = 'Camera permission denied.');
+      return;
     }
-  }
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _livenessTimer?.cancel();
-    _controller?.dispose();
-    _pulseCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _capture() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
-    setState(() => _capturing = true);
     try {
-      final xfile = await _controller!.takePicture();
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        setState(() => _camError = 'No cameras found.');
+        return;
+      }
+      
+      // Try to get front camera, fallback to back
+      final cam = cameras.firstWhere(
+        (c) => c.lensDirection == _cameraDirection,
+        orElse: () => cameras.first,
+      );
+
+      final ctrl = CameraController(
+        cam, 
+        ResolutionPreset.medium, 
+        enableAudio: false,
+        imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888,
+      );
+      
+      await ctrl.initialize();
+      if (!mounted) {
+        ctrl.dispose();
+        return;
+      }
+      
       setState(() {
-        _capturedPath = xfile.path;
-        _capturing = false;
+        _camCtrl = ctrl;
+        _camReady = true;
+        _camError = null;
       });
+
+      // Start live processing
+      _camCtrl!.startImageStream((CameraImage image) {
+        if (!_isProcessingFrame && _livenessState != LivenessState.success) {
+          _processFrame(image, cam.sensorOrientation);
+        }
+      });
+
     } catch (e) {
-      setState(() {
-        _error = 'Capture failed: $e';
-        _capturing = false;
-      });
+      if (mounted) setState(() => _camError = 'Camera error: $e');
     }
   }
 
-  Future<void> _pickFromGallery() async {
-    final picker = ImagePicker();
-    final picked = await picker.pickImage(source: ImageSource.gallery, imageQuality: 90);
-    if (picked != null) setState(() => _capturedPath = picked.path);
+  void _switchCamera() async {
+    if (_camCtrl == null) return;
+    _cameraDirection = _cameraDirection == CameraLensDirection.front 
+        ? CameraLensDirection.back 
+        : CameraLensDirection.front;
+    
+    await _camCtrl?.stopImageStream();
+    await _camCtrl?.dispose();
+    setState(() {
+      _camReady = false;
+      _camCtrl = null;
+    });
+    
+    // Crucial: Wait for the hardware lens to fully release before requesting the other one
+    Future.delayed(const Duration(milliseconds: 400), () {
+      if (mounted) _initCamera();
+    });
   }
 
-  void _proceed() {
-    if (_capturedPath == null) return;
-    context.pushNamed(
+  Future<void> _processFrame(CameraImage image, int sensorOrientation) async {
+    _isProcessingFrame = true;
+    try {
+      final WriteBuffer allBytes = WriteBuffer();
+      for (final Plane plane in image.planes) {
+        allBytes.putUint8List(plane.bytes);
+      }
+      final bytes = allBytes.done().buffer.asUint8List();
+
+      final Size imageSize = Size(image.width.toDouble(), image.height.toDouble());
+      final imageRotation = InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation0deg;
+      final inputImageFormat = InputImageFormatValue.fromRawValue(image.format.raw) ?? InputImageFormat.nv21;
+
+      final inputImageData = InputImageMetadata(
+        size: imageSize,
+        rotation: imageRotation,
+        format: inputImageFormat,
+        bytesPerRow: image.planes.isNotEmpty ? image.planes[0].bytesPerRow : 0,
+      );
+
+      final inputImage = InputImage.fromBytes(bytes: bytes, metadata: inputImageData);
+      final faces = await _faceDetector.processImage(inputImage);
+
+      if (!mounted) return;
+
+      if (faces.isEmpty) {
+        if (_livenessState != LivenessState.searching) {
+          setState(() {
+            _livenessState = LivenessState.searching;
+            _instructionText = "Face lost. Please position your face in the oval.";
+          });
+        }
+      } else {
+        final face = faces.first;
+        final leftEyeOpen = face.leftEyeOpenProbability ?? 1.0;
+        final rightEyeOpen = face.rightEyeOpenProbability ?? 1.0;
+        
+        // Ensure face is somewhat straight
+        final rotY = face.headEulerAngleY ?? 0;
+        final rotZ = face.headEulerAngleZ ?? 0;
+        
+        if (rotY.abs() > 15 || rotZ.abs() > 15) {
+          setState(() {
+            _instructionText = "Please look straight ahead.";
+          });
+          _isProcessingFrame = false;
+          return;
+        }
+
+        switch (_livenessState) {
+          case LivenessState.searching:
+            // Face found, wait for eyes open
+            if (leftEyeOpen > 0.7 && rightEyeOpen > 0.7) {
+              setState(() {
+                _livenessState = LivenessState.eyesOpen;
+                _instructionText = "Blink to verify liveness";
+              });
+              HapticFeedback.lightImpact();
+            } else {
+              setState(() => _instructionText = "Please open your eyes clearly");
+            }
+            break;
+            
+          case LivenessState.eyesOpen:
+            // Waiting for blink (eyes closed)
+            if (leftEyeOpen < 0.2 && rightEyeOpen < 0.2) {
+              setState(() {
+                _livenessState = LivenessState.blinked;
+                _instructionText = "Blink detected!";
+              });
+            }
+            break;
+            
+          case LivenessState.blinked:
+            // Eyes opened again -> Success!
+            if (leftEyeOpen > 0.7 && rightEyeOpen > 0.7) {
+              setState(() {
+                _livenessState = LivenessState.success;
+                _instructionText = "Liveness Verified!";
+              });
+              HapticFeedback.heavyImpact();
+              _onSuccess();
+            }
+            break;
+            
+          case LivenessState.success:
+            break;
+        }
+      }
+    } catch (e) {
+      debugPrint("Frame processing error: $e");
+    } finally {
+      if (mounted) _isProcessingFrame = false;
+    }
+  }
+
+  Future<void> _onSuccess() async {
+    try {
+      await _camCtrl?.stopImageStream();
+      // Take a high quality picture now that liveness is verified
+      final xfile = await _camCtrl!.takePicture();
+      _capturedFacePath = xfile.path;
+    } catch (e) {
+      debugPrint("Error taking final picture: $e");
+    }
+    
+    await Future.delayed(const Duration(seconds: 1));
+    if (!mounted) return;
+    
+    context.pushReplacementNamed(
       'checkpoint-progress',
       queryParameters: {
         'docId': widget.documentId,
-        'facePhoto': _capturedPath!,
+        'livePhoto': _capturedFacePath ?? '',
+        'ocrText': widget.ocrText,
+        'docPhoto': widget.docPhotoPath,
+        'docunetResult': widget.docunetResult,
       },
     );
   }
 
-  void _retake() => setState(() {
-        _capturedPath = null;
-        _livenessComplete = false;
-        _livenessCountdown = 3;
-        _promptIndex = 0;
-        _livenessPrompt = _livenessPrompts[0];
-        _startLivenessSequence();
-      });
+  @override
+  void dispose() {
+    try {
+      if (_camCtrl != null && _camCtrl!.value.isStreamingImages) {
+        _camCtrl!.stopImageStream();
+      }
+    } catch (_) {}
+    _camCtrl?.dispose();
+    _faceDetector.close();
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        title: Text(
-          'LIVE FACE CAPTURE',
-          style: GoogleFonts.rajdhani(
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.5,
-            color: Colors.white,
-          ),
-        ),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
-          onPressed: () => context.pop(),
-        ),
-      ),
-      body: _capturedPath != null
-          ? _ReviewFace(
-              path: _capturedPath!,
-              onRetake: _retake,
-              onProceed: _proceed,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // 1. Camera Preview
+          if (_camReady && _camCtrl != null)
+            FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: 100,
+                height: 100 * _camCtrl!.value.aspectRatio,
+                child: CameraPreview(_camCtrl!),
+              ),
             )
-          : _LiveCapture(
-              controller: _controller,
-              initialized: _initialized,
-              capturing: _capturing,
-              livenessComplete: _livenessComplete,
-              livenessPrompt: _livenessPrompt,
-              livenessCountdown: _livenessCountdown,
-              pulse: _pulse,
-              error: _error,
-              onCapture: _capture,
-              onGallery: _pickFromGallery,
+          else
+            const Center(child: CircularProgressIndicator(color: PramaanColors.primaryLight)),
+
+          // 2. Glassmorphic Cutout Overlay
+          ColorFiltered(
+            colorFilter: ColorFilter.mode(
+              Colors.black.withOpacity(0.7),
+              BlendMode.srcOut,
             ),
-    );
-  }
-}
-
-class _LiveCapture extends StatelessWidget {
-  final CameraController? controller;
-  final bool initialized;
-  final bool capturing;
-  final bool livenessComplete;
-  final String livenessPrompt;
-  final int livenessCountdown;
-  final Animation<double> pulse;
-  final String? error;
-  final VoidCallback onCapture;
-  final VoidCallback onGallery;
-
-  const _LiveCapture({
-    required this.controller,
-    required this.initialized,
-    required this.capturing,
-    required this.livenessComplete,
-    required this.livenessPrompt,
-    required this.livenessCountdown,
-    required this.pulse,
-    required this.error,
-    required this.onCapture,
-    required this.onGallery,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (error != null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.camera_enhance, color: PramaanColors.textMuted, size: 48),
-            const SizedBox(height: 16),
-            Text(error!,
-                style: GoogleFonts.roboto(color: PramaanColors.textMuted),
-                textAlign: TextAlign.center),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: onGallery,
-              icon: const Icon(Icons.photo_library_outlined),
-              label: const Text('PICK FROM GALLERY'),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Container(
+                  decoration: const BoxDecoration(
+                    color: Colors.black,
+                    backgroundBlendMode: BlendMode.dstOut,
+                  ),
+                ),
+                Center(
+                  child: Container(
+                    width: 280,
+                    height: 380,
+                    decoration: BoxDecoration(
+                      color: Colors.black,
+                      borderRadius: BorderRadius.circular(150),
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      );
-    }
+          ),
 
-    if (!initialized) {
-      return const Center(
-          child: CircularProgressIndicator(color: PramaanColors.steelBlue));
-    }
-
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: CameraPreview(controller!),
-        ),
-
-        // Oval guide with liveness ring
-        Center(
-          child: AnimatedBuilder(
-            animation: pulse,
-            builder: (_, child) => Transform.scale(
-              scale: livenessComplete ? 1.0 : pulse.value,
-              child: child,
+          // 3. Glowing Border around the oval
+          Center(
+            child: AnimatedBuilder(
+              animation: _pulseAnim,
+              builder: (context, child) {
+                Color glowColor = _livenessState == LivenessState.success 
+                    ? PramaanColors.pass 
+                    : PramaanColors.primaryLight;
+                
+                return Transform.scale(
+                  scale: _livenessState == LivenessState.success ? 1.0 : _pulseAnim.value,
+                  child: Container(
+                    width: 280,
+                    height: 380,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(150),
+                      border: Border.all(
+                        color: glowColor.withOpacity(0.8),
+                        width: 4,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: glowColor.withOpacity(0.3),
+                          blurRadius: 20,
+                          spreadRadius: 5,
+                        )
+                      ]
+                    ),
+                  ),
+                );
+              }
             ),
-            child: Container(
-              width: 230,
-              height: 300,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(115),
-                border: Border.all(
-                  color: livenessComplete
-                      ? PramaanColors.pass
-                      : PramaanColors.steelBlue,
-                  width: 3,
+          ),
+
+          // 4. Modern Glassmorphic Bottom Panel
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: ClipRRect(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 24),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withOpacity(0.4),
+                        Colors.black.withOpacity(0.8),
+                      ]
+                    ),
+                    border: Border(top: BorderSide(color: Colors.white.withOpacity(0.2))),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _livenessState == LivenessState.success 
+                            ? Icons.check_circle 
+                            : Icons.face_retouching_natural,
+                        color: _livenessState == LivenessState.success 
+                            ? PramaanColors.pass 
+                            : Colors.white,
+                        size: 48,
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        _instructionText,
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.rajdhani(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                          color: _livenessState == LivenessState.success 
+                              ? PramaanColors.pass 
+                              : Colors.white,
+                          letterSpacing: 1.2,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        _livenessState == LivenessState.success 
+                            ? "Processing verification..."
+                            : "Liveness Check (Automatic)",
+                        style: GoogleFonts.roboto(
+                          color: Colors.white60,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
-        ),
 
-        // Liveness status
-        Positioned(
-          top: 24,
-          left: 20,
-          right: 20,
-          child: Column(
-            children: [
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                decoration: BoxDecoration(
-                  color: livenessComplete
-                      ? PramaanColors.pass.withOpacity(0.9)
-                      : Colors.black.withOpacity(0.7),
-                  borderRadius: BorderRadius.circular(30),
-                  border: Border.all(
-                    color: livenessComplete
-                        ? PramaanColors.pass
-                        : PramaanColors.steelBlue.withOpacity(0.5),
-                  ),
-                ),
+          // 5. Top Bar with Camera Switch
+          SafeArea(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Icon(
-                      livenessComplete
-                          ? Icons.check_circle
-                          : Icons.remove_red_eye_outlined,
-                      color: livenessComplete
-                          ? Colors.white
-                          : PramaanColors.steelBlue,
-                      size: 18,
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back, color: Colors.white),
+                      onPressed: () => context.go('/checkpoint'),
                     ),
-                    const SizedBox(width: 8),
                     Text(
-                      livenessComplete ? 'Liveness Confirmed' : livenessPrompt,
-                      style: GoogleFonts.roboto(
+                      'BIOMETRIC CAPTURE',
+                      style: GoogleFonts.rajdhani(
+                        fontWeight: FontWeight.w700,
                         color: Colors.white,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
+                        fontSize: 17,
+                        letterSpacing: 1.5,
                       ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.cameraswitch, color: Colors.white),
+                      onPressed: _switchCamera,
                     ),
                   ],
                 ),
               ),
-              if (!livenessComplete) ...[
-                const SizedBox(height: 8),
-                Text(
-                  'Checking in $livenessCountdown…',
-                  style: GoogleFonts.roboto(
-                    color: Colors.white54,
-                    fontSize: 12,
-                  ),
-                ),
-              ],
-            ],
+            ),
           ),
-        ),
-
-        // Controls
-        Positioned(
-          bottom: 40,
-          left: 0,
-          right: 0,
-          child: Column(
-            children: [
-              if (!livenessComplete)
-                Text(
-                  'Complete liveness check before capturing',
-                  style: GoogleFonts.roboto(
-                    color: Colors.white54,
-                    fontSize: 12,
-                  ),
-                ),
-              const SizedBox(height: 16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  IconButton(
-                    onPressed: onGallery,
-                    icon: const Icon(Icons.photo_library_outlined,
-                        color: Colors.white, size: 32),
-                  ),
-                  GestureDetector(
-                    onTap: (livenessComplete && !capturing) ? onCapture : null,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 300),
-                      width: 80,
-                      height: 80,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: livenessComplete
-                              ? PramaanColors.pass
-                              : Colors.white38,
-                          width: 4,
-                        ),
-                        color: livenessComplete
-                            ? PramaanColors.pass.withOpacity(0.2)
-                            : Colors.white12,
-                      ),
-                      child: Center(
-                        child: capturing
-                            ? const CircularProgressIndicator(
-                                color: Colors.white)
-                            : Icon(
-                                Icons.camera,
-                                color: livenessComplete
-                                    ? Colors.white
-                                    : Colors.white38,
-                                size: 36,
-                              ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 48),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _ReviewFace extends StatelessWidget {
-  final String path;
-  final VoidCallback onRetake;
-  final VoidCallback onProceed;
-
-  const _ReviewFace({
-    required this.path,
-    required this.onRetake,
-    required this.onProceed,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Expanded(
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              Image.file(File(path), fit: BoxFit.cover),
-              Positioned(
-                top: 20,
-                left: 0,
-                right: 0,
+          
+          // Error State
+          if (_camError != null)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black87,
                 child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 20, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: PramaanColors.pass.withOpacity(0.9),
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                    child: const Row(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.check_circle,
-                            color: Colors.white, size: 18),
-                        SizedBox(width: 8),
-                        Text(
-                          'Liveness Verified',
-                          style: TextStyle(color: Colors.white, fontSize: 13),
-                        ),
+                        const Icon(Icons.error_outline, color: PramaanColors.riskHigh, size: 48),
+                        const SizedBox(height: 16),
+                        Text(_camError!, style: const TextStyle(color: Colors.white), textAlign: TextAlign.center),
                       ],
                     ),
                   ),
                 ),
               ),
-            ],
-          ),
-        ),
-        Container(
-          color: Colors.black,
-          padding: const EdgeInsets.all(24),
-          child: Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    side: const BorderSide(color: Colors.white54),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                  onPressed: onRetake,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('RETAKE'),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                flex: 2,
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: PramaanColors.pass,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                  onPressed: onProceed,
-                  icon: const Icon(Icons.security),
-                  label: const Text('VERIFY DOCUMENT'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
+            ),
+        ],
+      ),
     );
   }
 }

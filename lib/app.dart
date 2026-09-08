@@ -1,9 +1,6 @@
 import 'package:go_router/go_router.dart';
 import 'screens/splash/splash_screen.dart';
-import 'screens/issuance/issuance_form_screen.dart';
-import 'screens/issuance/issuance_photo_screen.dart';
-import 'screens/issuance/issuance_processing_screen.dart';
-import 'screens/issuance/issuance_result_screen.dart';
+// Issuance routes removed as requested
 import 'screens/checkpoint/checkpoint_scan_screen.dart';
 import 'screens/checkpoint/checkpoint_face_screen.dart';
 import 'screens/checkpoint/checkpoint_progress_screen.dart';
@@ -22,31 +19,6 @@ class AppRouter {
         builder: (_, __) => const SplashScreen(),
       ),
 
-      // ── Issuance Flow ──────────────────────────────────────────────────────
-      GoRoute(
-        path: '/issuance/form',
-        name: 'issuance-form',
-        builder: (_, __) => const IssuanceFormScreen(),
-      ),
-      GoRoute(
-        path: '/issuance/photo',
-        name: 'issuance-photo',
-        builder: (_, __) => const IssuancePhotoScreen(),
-      ),
-      GoRoute(
-        path: '/issuance/processing',
-        name: 'issuance-processing',
-        builder: (_, __) => const IssuanceProcessingScreen(),
-      ),
-      GoRoute(
-        path: '/issuance/result',
-        name: 'issuance-result',
-        builder: (_, state) {
-          final docId = state.uri.queryParameters['docId'] ?? '';
-          return IssuanceResultScreen(documentId: docId);
-        },
-      ),
-
       // ── Checkpoint Flow ───────────────────────────────────────────────────
       GoRoute(
         path: '/checkpoint/scan',
@@ -58,7 +30,8 @@ class AppRouter {
         name: 'checkpoint-face',
         builder: (_, state) {
           final docId = state.uri.queryParameters['docId'] ?? '';
-          return CheckpointFaceScreen(documentId: docId);
+          final docunetResult = state.uri.queryParameters['docunetResult'] ?? '';
+          return CheckpointFaceScreen(documentId: docId, docunetResult: docunetResult);
         },
       ),
       GoRoute(
@@ -66,12 +39,15 @@ class AppRouter {
         name: 'checkpoint-progress',
         builder: (_, state) {
           final docId = state.uri.queryParameters['docId'] ?? '';
-          final facePhoto = state.uri.queryParameters['facePhoto'] ?? '';
-          final tamper = state.uri.queryParameters['tamper'];
+          final facePhoto = state.uri.queryParameters['livePhoto'] ?? '';
+          final docPhoto = state.uri.queryParameters['docPhoto'] ?? '';
+          final docunetResult = state.uri.queryParameters['docunetResult'] ?? '';
+          
           return CheckpointProgressScreen(
             documentId: docId,
             facePhotoPath: facePhoto,
-            tamperType: tamper,
+            docPhotoPath: docPhoto,
+            docunetResult: docunetResult,
           );
         },
       ),

@@ -1,0 +1,43 @@
+# Build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data & model weights
+data/
+output/
+models/checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# Test / CI artifacts
+htmlcov/
+.coverage
+.pytest_cache/
+.mypy_cache/
+
+# System
+.DS_Store
+Thumbs.db
+*.log
+
+# Docker layer cache
+.git/
+.gitignore
+.dockerignore
+*.md
+tests/

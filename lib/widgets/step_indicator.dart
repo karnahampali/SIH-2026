@@ -99,7 +99,7 @@ class _StepRowState extends State<_StepRow> with SingleTickerProviderStateMixin 
       dotColor = PramaanColors.pass;
       dotChild = const Icon(Icons.check, size: 16, color: Colors.white);
     } else if (widget.isActive) {
-      dotColor = PramaanColors.steelBlue;
+      dotColor = PramaanColors.primary;
       dotChild = AnimatedBuilder(
         animation: _pulse,
         builder: (_, __) => Container(
@@ -161,7 +161,7 @@ class _StepRowState extends State<_StepRow> with SingleTickerProviderStateMixin 
                 color: widget.isDone
                     ? PramaanColors.textPrimary
                     : widget.isActive
-                        ? PramaanColors.steelBlue
+                        ? PramaanColors.primary
                         : PramaanColors.textMuted,
                 fontWeight: widget.isActive || widget.isDone
                     ? FontWeight.w500
@@ -256,13 +256,13 @@ class _ChecklistRowState extends State<_ChecklistRow>
     Widget icon;
 
     if (passed == null) {
-      color = PramaanColors.steelBlue;
+      color = PramaanColors.primary;
       icon = SizedBox(
         width: 20,
         height: 20,
         child: CircularProgressIndicator(
           strokeWidth: 2,
-          color: PramaanColors.steelBlue,
+          color: PramaanColors.primary,
         ),
       );
     } else if (passed) {

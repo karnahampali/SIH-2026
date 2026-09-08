@@ -97,7 +97,7 @@ class _TamperDemoScreenState extends ConsumerState<TamperDemoScreen>
     final docs = storage.getAllDocuments();
 
     return Scaffold(
-      backgroundColor: PramaanColors.navyDark,
+      backgroundColor: PramaanColors.surfaceDark,
       appBar: AppBar(
         title: const Text('TAMPER DEMO'),
         leading: IconButton(
@@ -361,11 +361,11 @@ class _DocSelectTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
           color: selected
-              ? PramaanColors.steelBlue.withOpacity(0.15)
+              ? PramaanColors.primary.withOpacity(0.15)
               : PramaanColors.surfaceCard,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: selected ? PramaanColors.steelBlue : PramaanColors.divider,
+            color: selected ? PramaanColors.primary : PramaanColors.divider,
             width: selected ? 2 : 1,
           ),
         ),
@@ -415,7 +415,7 @@ class _DocSelectTile extends StatelessWidget {
               ),
             ),
             if (selected)
-              const Icon(Icons.check_circle, color: PramaanColors.steelBlue, size: 22),
+              const Icon(Icons.check_circle, color: PramaanColors.primary, size: 22),
           ],
         ),
       ),

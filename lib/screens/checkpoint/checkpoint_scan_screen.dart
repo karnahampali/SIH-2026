@@ -1,11 +1,19 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:ui';
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
-import '../../models/issued_document.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:permission_handler/permission_handler.dart';
+
 import '../../providers.dart';
 import '../../widgets/pramaan_theme.dart';
+import '../../services/api_service.dart';
 
 class CheckpointScanScreen extends ConsumerStatefulWidget {
   const CheckpointScanScreen({super.key});
@@ -15,324 +23,460 @@ class CheckpointScanScreen extends ConsumerStatefulWidget {
       _CheckpointScanScreenState();
 }
 
-class _CheckpointScanScreenState extends ConsumerState<CheckpointScanScreen> {
-  MobileScannerController? _scannerCtrl;
-  bool _scanned = false;
-  bool _showList = false;
+class _CheckpointScanScreenState extends ConsumerState<CheckpointScanScreen>
+    with SingleTickerProviderStateMixin {
+  CameraController? _camCtrl;
+  bool _camReady = false;
+  String? _camError;
+
+  bool _isProcessing = false;
+  String? _statusMsg;
+  bool _isError = false;
+  bool _matched = false;
+
+  late AnimationController _pulseCtrl;
+  late Animation<double> _pulseAnim;
+
+  bool _isSendingFrame = false;
+  
+  final TextRecognizer _textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
+  bool _isScanningText = false;
 
   @override
   void initState() {
     super.initState();
-    _scannerCtrl = MobileScannerController(
-      detectionSpeed: DetectionSpeed.normal,
-      facing: CameraFacing.back,
-    );
+    _pulseCtrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1100))
+      ..repeat(reverse: true);
+    _pulseAnim = Tween<double>(begin: 0.8, end: 1.1)
+        .animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
+    
+    _initCamera();
+  }
+
+  void _handleDocuNetResult(Map<String, dynamic> response) async {
+    if (response['success'] == true) {
+      final parsedDoc = response['document'];
+      final fullText = parsedDoc?['raw_text'] ?? '';
+      
+      setState(() { _statusMsg = 'Scan complete — proceeding'; _isProcessing = false; _matched = true; });
+
+      HapticFeedback.heavyImpact();
+      await Future.delayed(const Duration(milliseconds: 700));
+      if (!mounted) return;
+
+      final docId = 'scan_${DateTime.now().millisecondsSinceEpoch}';
+      _goFace(docId, fullText, '', json.encode(response));
+    } else {
+      setState(() {
+        _statusMsg = 'DocuNet failed: ${response['error_message'] ?? 'Unknown error'}';
+        _isError = true;
+        _isProcessing = false;
+      });
+      // Restart processing after a delay
+      await Future.delayed(const Duration(seconds: 2));
+      if (mounted) setState(() => _isProcessing = false);
+    }
+  }
+
+  Future<void> _initCamera() async {
+    final status = await Permission.camera.request();
+    if (!mounted) return;
+    if (status.isDenied || status.isPermanentlyDenied) {
+      setState(() => _camError = 'Camera permission denied.');
+      return;
+    }
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        setState(() => _camError = 'No cameras found.');
+        return;
+      }
+      final back = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+      // Medium resolution looks good enough without being too huge for ML kit
+      final ctrl = CameraController(
+        back, 
+        ResolutionPreset.medium, 
+        enableAudio: false,
+        imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888,
+      );
+      await ctrl.initialize();
+      if (!mounted) { ctrl.dispose(); return; }
+      setState(() { _camCtrl = ctrl; _camReady = true; _camError = null; });
+      
+      // Start live text detection stream
+      _camCtrl!.startImageStream((CameraImage image) {
+        if (!_isProcessing && !_isSendingFrame && !_matched && !_isScanningText) {
+          _scanForDocument(image, back.sensorOrientation);
+        }
+      });
+    } catch (e) {
+      if (mounted) setState(() => _camError = 'Camera error: $e');
+    }
   }
 
   @override
   void dispose() {
-    _scannerCtrl?.dispose();
+    try {
+      if (_camCtrl != null && _camCtrl!.value.isStreamingImages) {
+        _camCtrl!.stopImageStream();
+      }
+    } catch (_) {}
+    _textRecognizer.close();
+    _camCtrl?.dispose();
+    _pulseCtrl.dispose();
     super.dispose();
   }
 
-  void _onDetect(BarcodeCapture capture) {
-    if (_scanned) return;
-    final code = capture.barcodes.first.rawValue;
-    if (code == null || code.isEmpty) return;
+  Future<void> _scanForDocument(CameraImage image, int sensorOrientation) async {
+    _isScanningText = true;
+    try {
+      final WriteBuffer allBytes = WriteBuffer();
+      for (final Plane plane in image.planes) {
+        allBytes.putUint8List(plane.bytes);
+      }
+      final bytes = allBytes.done().buffer.asUint8List();
 
-    _scanned = true;
-    _scannerCtrl?.stop();
+      final Size imageSize = Size(image.width.toDouble(), image.height.toDouble());
+      final imageRotation = InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation0deg;
+      final inputImageFormat = InputImageFormatValue.fromRawValue(image.format.raw) ?? InputImageFormat.nv21;
 
-    final storage = ref.read(storageServiceProvider);
-    final doc = storage.getDocument(code);
-
-    if (doc == null) {
-      setState(() => _scanned = false);
-      _scannerCtrl?.start();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Document not found in database. Try manual selection.'),
-          backgroundColor: PramaanColors.riskHigh,
-        ),
+      final inputImageData = InputImageMetadata(
+        size: imageSize,
+        rotation: imageRotation,
+        format: inputImageFormat,
+        bytesPerRow: image.planes.isNotEmpty ? image.planes[0].bytesPerRow : 0,
       );
-      return;
-    }
 
-    _navigateToFace(doc.id);
+      final inputImage = InputImage.fromBytes(bytes: bytes, metadata: inputImageData);
+      final recognizedText = await _textRecognizer.processImage(inputImage);
+
+      if (!mounted) return;
+
+      // If we see at least 5 blocks of text, it's highly likely a document
+      if (recognizedText.blocks.length >= 5) {
+        setState(() {
+          _statusMsg = "Document Detected. Capturing...";
+        });
+        HapticFeedback.selectionClick();
+        _captureAndVerify();
+      } else {
+        if (_statusMsg != "Hold steady for automatic capture") {
+          setState(() {
+             _statusMsg = "No Document Detected";
+             _isError = false;
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint("Live scan error: $e");
+    } finally {
+      if (mounted) _isScanningText = false;
+    }
   }
 
-  void _navigateToFace(String docId) {
-    context.pushNamed(
-      'checkpoint-face',
-      queryParameters: {'docId': docId},
-    );
+  Future<void> _captureAndVerify() async {
+    if (_isProcessing || _camCtrl == null || !_camReady || _isSendingFrame || _matched) return;
+    
+    _isSendingFrame = true;
+    try {
+      // Must stop stream before taking a high-res picture
+      await _camCtrl!.stopImageStream();
+      
+      // Samsung devices take 2-4 seconds to execute takePicture
+      final xfile = await _camCtrl!.takePicture().timeout(const Duration(seconds: 5));
+      
+      final api = ApiService();
+      // Generous timeout to allow for model inference on first run
+      final response = await api.verifyDocument(xfile.path).timeout(const Duration(seconds: 15));
+      
+      File(xfile.path).delete().ignore();
+
+      if (response['success'] == true) {
+         _handleDocuNetResult(response);
+      } else {
+         if (mounted) {
+           setState(() {
+             _isError = true;
+             _statusMsg = response['error_message'] ?? 'Adjust document...';
+           });
+         }
+      }
+    } on TimeoutException {
+      if (mounted) setState(() { _isError = true; _statusMsg = "Connection or Camera timeout"; });
+      _resumeStream();
+    } catch (e) {
+      if (mounted) setState(() { _isError = true; _statusMsg = "Backend Error: Server overloaded"; });
+      _resumeStream();
+    } finally {
+      if (mounted) _isSendingFrame = false;
+    }
+  }
+
+  void _resumeStream() async {
+    if (!mounted || _camCtrl == null || _matched) return;
+    try {
+      await Future.delayed(const Duration(seconds: 1));
+      if (!mounted) return;
+      final back = (await availableCameras()).firstWhere((c) => c.lensDirection == CameraLensDirection.back);
+      _camCtrl!.startImageStream((CameraImage image) {
+        if (!_isProcessing && !_isSendingFrame && !_matched && !_isScanningText) {
+          _scanForDocument(image, back.sensorOrientation);
+        }
+      });
+    } catch (e) {
+      debugPrint("Could not resume stream: $e");
+    }
+  }
+
+  void _goFace(String docId, String ocrText, String docImagePath, [String docunetResult = '']) {
+    context.pushReplacementNamed('checkpoint-face', queryParameters: {
+      'docId': docId, 'ocrText': ocrText, 'docPhoto': docImagePath, 'docunetResult': docunetResult
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        title: Text(
-          'CHECKPOINT — SCAN DOCUMENT',
-          style: GoogleFonts.rajdhani(
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.5,
-            color: Colors.white,
-          ),
-        ),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
-          onPressed: () => context.pop(),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => setState(() => _showList = !_showList),
-            child: Text(
-              _showList ? 'SCAN' : 'SELECT',
-              style: GoogleFonts.rajdhani(
-                color: PramaanColors.accent,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-        ],
-      ),
-      body: _showList
-          ? _DocumentListPicker(
-              onSelect: (docId) {
-                setState(() => _showList = false);
-                _navigateToFace(docId);
-              },
-            )
-          : _ScannerView(
-              controller: _scannerCtrl!,
-              onDetect: _onDetect,
-            ),
+      body: _buildCamera(),
     );
   }
-}
 
-class _ScannerView extends StatelessWidget {
-  final MobileScannerController controller;
-  final void Function(BarcodeCapture) onDetect;
-
-  const _ScannerView({required this.controller, required this.onDetect});
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildCamera() {
     return Stack(
+      fit: StackFit.expand,
       children: [
-        MobileScanner(
-          controller: controller,
-          onDetect: onDetect,
-        ),
+        if (_camReady && _camCtrl != null)
+          FittedBox(
+            fit: BoxFit.cover,
+            child: SizedBox(
+              width: 100,
+              height: 100 * _camCtrl!.value.aspectRatio,
+              child: CameraPreview(_camCtrl!),
+            ),
+          )
+        else if (_camError != null)
+          Container(
+            color: const Color(0xFF0A0E1A),
+            child: Center(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.no_photography, color: Colors.white38, size: 56),
+                const SizedBox(height: 12),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: Text(_camError!, textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white54)),
+                ),
+                const SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: () { setState(() => _camError = null); _initCamera(); },
+                  child: const Text('Retry'),
+                ),
+              ]),
+            ),
+          )
+        else
+          const Center(child: CircularProgressIndicator(color: PramaanColors.primaryLight)),
 
-        // Dark overlay with scan frame
-        CustomPaint(
-          painter: _ScanFramePainter(),
-          child: Container(),
-        ),
-
-        // Status text
-        Positioned(
-          bottom: 100,
-          left: 0,
-          right: 0,
-          child: Column(
+        // Glassmorphic Cutout Overlay
+        ColorFiltered(
+          colorFilter: ColorFilter.mode(
+            Colors.black.withOpacity(0.7),
+            BlendMode.srcOut,
+          ),
+          child: Stack(
+            fit: StackFit.expand,
             children: [
-              const Icon(Icons.qr_code_scanner,
-                  color: Colors.white54, size: 24),
-              const SizedBox(height: 8),
-              Text(
-                'Align QR code with the frame',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.roboto(
-                  color: Colors.white70,
-                  fontSize: 14,
+              Container(
+                decoration: const BoxDecoration(
+                  color: Colors.black,
+                  backgroundBlendMode: BlendMode.dstOut,
                 ),
               ),
-              const SizedBox(height: 4),
-              Text(
-                'Or tap SELECT to choose from issued documents',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.roboto(
-                  color: Colors.white38,
-                  fontSize: 12,
+              Center(
+                child: Container(
+                  width: MediaQuery.of(context).size.width - 40,
+                  height: 240,
+                  decoration: BoxDecoration(
+                    color: Colors.black,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
                 ),
               ),
             ],
           ),
         ),
+
+        // Glowing Bracket Reticle
+        Center(
+          child: AnimatedBuilder(
+            animation: _pulseAnim,
+            builder: (_, __) {
+              Color glowColor = _matched 
+                  ? PramaanColors.pass 
+                  : _isError 
+                      ? PramaanColors.riskHigh 
+                      : PramaanColors.primaryLight;
+                      
+              return Transform.scale(
+                scale: (_isProcessing || _matched || _isError) ? 1.0 : _pulseAnim.value,
+                child: Container(
+                  width: MediaQuery.of(context).size.width - 40,
+                  height: 240,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: glowColor.withOpacity(0.8),
+                      width: 3,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: glowColor.withOpacity(0.3),
+                        blurRadius: 15,
+                        spreadRadius: 2,
+                      )
+                    ]
+                  ),
+                  child: Stack(children: [
+                    _corner(Alignment.topLeft, glowColor), 
+                    _corner(Alignment.topRight, glowColor),
+                    _corner(Alignment.bottomLeft, glowColor), 
+                    _corner(Alignment.bottomRight, glowColor),
+                  ]),
+                ),
+              );
+            }
+          ),
+        ),
+
+        // Bottom Panel
+        Align(
+          alignment: Alignment.bottomCenter,
+          child: ClipRRect(
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 24),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withOpacity(0.4),
+                      Colors.black.withOpacity(0.8),
+                    ]
+                  ),
+                  border: Border(top: BorderSide(color: Colors.white.withOpacity(0.2))),
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.flashlight_on, color: Colors.white),
+                            onPressed: () => _camCtrl?.setFlashMode(FlashMode.torch),
+                          ),
+                          Expanded(
+                            child: Text(
+                              _statusMsg ?? 'Scanning Document...',
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.rajdhani(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: _isError ? PramaanColors.riskHigh : _matched ? PramaanColors.pass : Colors.white,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.flashlight_off, color: Colors.white),
+                            onPressed: () => _camCtrl?.setFlashMode(FlashMode.off),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        _isProcessing ? "Processing via DocuNet..." : "Hold steady for automatic capture",
+                        style: GoogleFonts.roboto(
+                          color: Colors.white60,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+
+        // Top Bar
+        SafeArea(
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => context.go('/'),
+                ),
+                Text('DOCUMENT SCANNER', style: GoogleFonts.rajdhani(
+                    fontWeight: FontWeight.w700, color: Colors.white, fontSize: 17, letterSpacing: 1.5)),
+                const SizedBox(width: 48), // Padding equivalent to icon
+              ]),
+            ),
+          ),
+        ),
       ],
     );
   }
+
+  Widget _corner(Alignment alignment, Color color) {
+    return Align(
+      alignment: alignment,
+      child: SizedBox(
+        width: 30, height: 30,
+        child: CustomPaint(painter: _CornerPainter(alignment, color, 4)),
+      ),
+    );
+  }
 }
 
-class _ScanFramePainter extends CustomPainter {
+class _CornerPainter extends CustomPainter {
+  final Alignment alignment;
+  final Color color;
+  final double thickness;
+  _CornerPainter(this.alignment, this.color, this.thickness);
+
   @override
   void paint(Canvas canvas, Size size) {
-    final frameSize = size.width * 0.65;
-    final left = (size.width - frameSize) / 2;
-    final top = (size.height - frameSize) / 2;
-    final rect = Rect.fromLTWH(left, top, frameSize, frameSize);
-
-    // Dark overlay
-    final overlayPaint = Paint()..color = Colors.black.withOpacity(0.6);
-    final path = Path()
-      ..addRect(Rect.fromLTWH(0, 0, size.width, size.height))
-      ..addRect(rect)
-      ..fillType = PathFillType.evenOdd;
-    canvas.drawPath(path, overlayPaint);
-
-    // Corner brackets
-    final bracketPaint = Paint()
-      ..color = PramaanColors.steelBlue
-      ..strokeWidth = 3
-      ..style = PaintingStyle.stroke;
-    const bracketLen = 24.0;
-
-    void drawCorner(double x, double y, double dx, double dy) {
-      canvas.drawLine(Offset(x, y), Offset(x + dx, y), bracketPaint);
-      canvas.drawLine(Offset(x, y), Offset(x, y + dy), bracketPaint);
+    final p = Paint()..color = color..strokeWidth = thickness..style = PaintingStyle.stroke;
+    final l = size.width;
+    if (alignment == Alignment.topLeft) {
+      canvas.drawLine(Offset.zero, Offset(l, 0), p);
+      canvas.drawLine(Offset.zero, Offset(0, l), p);
+    } else if (alignment == Alignment.topRight) {
+      canvas.drawLine(const Offset(0, 0), Offset(l, 0), p);
+      canvas.drawLine(Offset(l, 0), Offset(l, l), p);
+    } else if (alignment == Alignment.bottomLeft) {
+      canvas.drawLine(Offset(0, l), Offset(l, l), p);
+      canvas.drawLine(const Offset(0, 0), Offset(0, l), p);
+    } else {
+      canvas.drawLine(Offset(0, l), Offset(l, l), p);
+      canvas.drawLine(Offset(l, 0), Offset(l, l), p);
     }
-
-    drawCorner(left, top, bracketLen, bracketLen);
-    drawCorner(left + frameSize, top, -bracketLen, bracketLen);
-    drawCorner(left, top + frameSize, bracketLen, -bracketLen);
-    drawCorner(left + frameSize, top + frameSize, -bracketLen, -bracketLen);
   }
 
   @override
-  bool shouldRepaint(_) => false;
-}
-
-class _DocumentListPicker extends ConsumerWidget {
-  final void Function(String docId) onSelect;
-
-  const _DocumentListPicker({required this.onSelect});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final storage = ref.watch(storageServiceProvider);
-    final docs = storage.getAllDocuments();
-
-    if (docs.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.folder_off_outlined,
-                color: PramaanColors.textMuted, size: 48),
-            const SizedBox(height: 16),
-            Text(
-              'No issued documents found',
-              style: GoogleFonts.roboto(color: PramaanColors.textMuted),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Issue a document first from the Issuance mode',
-              style: GoogleFonts.roboto(
-                color: PramaanColors.textMuted,
-                fontSize: 12,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: docs.length,
-      itemBuilder: (_, i) => _DocListTile(doc: docs[i], onTap: () => onSelect(docs[i].id)),
-    );
-  }
-}
-
-class _DocListTile extends StatelessWidget {
-  final IssuedDocument doc;
-  final VoidCallback onTap;
-
-  const _DocListTile({required this.doc, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final isExpired = DateTime.tryParse(doc.expiry)?.isBefore(DateTime.now()) ?? false;
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: PramaanColors.surfaceCard,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: isExpired
-              ? PramaanColors.riskHigh.withOpacity(0.4)
-              : PramaanColors.divider,
-        ),
-      ),
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        leading: Container(
-          width: 48,
-          height: 48,
-          decoration: BoxDecoration(
-            color: PramaanColors.steelBlue.withOpacity(0.15),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Icon(
-            _docIcon(doc.docType),
-            color: PramaanColors.steelBlue,
-            size: 26,
-          ),
-        ),
-        title: Text(
-          doc.name,
-          style: GoogleFonts.rajdhani(
-            fontSize: 17,
-            fontWeight: FontWeight.w700,
-            color: PramaanColors.textPrimary,
-          ),
-        ),
-        subtitle: Text(
-          '${doc.docType} · ${doc.idNumber} · Expires: ${doc.expiry}',
-          style: GoogleFonts.roboto(
-            fontSize: 12,
-            color: isExpired ? PramaanColors.riskHigh : PramaanColors.textMuted,
-          ),
-        ),
-        trailing: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-          decoration: BoxDecoration(
-            color: PramaanColors.steelBlue.withOpacity(0.15),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text(
-            doc.displayId,
-            style: GoogleFonts.roboto(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: PramaanColors.steelBlue,
-              letterSpacing: 1,
-            ),
-          ),
-        ),
-        onTap: onTap,
-      ),
-    );
-  }
-
-  IconData _docIcon(String type) {
-    switch (type) {
-      case 'Passport':
-        return Icons.book_outlined;
-      case 'Visa':
-        return Icons.approval_outlined;
-      case 'National ID':
-        return Icons.badge_outlined;
-      default:
-        return Icons.description_outlined;
-    }
-  }
+  bool shouldRepaint(covariant CustomPainter old) => false;
 }

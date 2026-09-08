@@ -4,6 +4,7 @@ import 'services/face_service.dart';
 import 'services/hash_service.dart';
 import 'services/storage_service.dart';
 import 'services/verification_service.dart';
+import 'services/api_service.dart';
 
 // ─── Service Providers ────────────────────────────────────────────────────────
 
@@ -13,6 +14,10 @@ final storageServiceProvider = Provider<StorageService>((ref) {
 
 final cryptoServiceProvider = Provider<CryptoService>((ref) {
   return CryptoService();
+});
+
+final apiServiceProvider = Provider<ApiService>((ref) {
+  return ApiService();
 });
 
 final hashServiceProvider = Provider<HashService>((ref) {

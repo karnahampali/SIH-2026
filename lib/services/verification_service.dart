@@ -92,6 +92,7 @@ class VerificationService {
   Future<VerificationResult> verifyDocument({
     required String documentId,
     required File livePhoto,
+    String ocrText = '',
     void Function(String step)? onStep,
     TamperSpec? tamperSpec,
   }) async {
@@ -123,6 +124,18 @@ class VerificationService {
           effectiveName = tamperSpec.newName ?? '${doc.name} (CLONE)';
           cloned = true;
           break;
+      }
+    }
+
+    // --- REAL OCR TAMPER CHECK ---
+    if (ocrText.isNotEmpty) {
+      // Clean up OCR text (remove spaces, hyphens) to match DOB easily
+      String cleanOcr = ocrText.replaceAll('-', '').replaceAll(' ', '');
+      String cleanDob = doc.dob.replaceAll('-', '');
+      
+      if (!cleanOcr.contains(cleanDob)) {
+        dobTampered = true;
+        effectiveDob = 'TAMPERED_OCR_READ';
       }
     }
 
