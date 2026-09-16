@@ -90,6 +90,33 @@ Camera / Upload
 
 ## How to Run
 
+### Run the PRAMAAN API for the Flutter app
+
+From the `backend` directory on Windows:
+
+```bat
+start.bat
+```
+
+The API listens on `http://0.0.0.0:8000`. With a USB-connected Android phone,
+`start.bat` configures `adb reverse`, and the app uses
+`http://127.0.0.1:8000`. For an Android emulator use:
+
+```bash
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000
+```
+
+A phone without USB reverse forwarding must use the laptop's LAN address,
+passed when launching Flutter:
+
+```bash
+flutter run --dart-define=API_BASE_URL=http://<laptop-lan-ip>:8000
+```
+
+Open `http://localhost:8000/docs` to confirm the server is running. The first
+analysis request can take longer while OCR models load; later requests reuse
+the cached models.
+
 ### Prerequisites
 
 - Python 3.10+

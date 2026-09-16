@@ -145,6 +145,14 @@ class _SplashScreenState extends State<SplashScreen>
                           color: PramaanColors.primary,
                           onTap: () => context.pushNamed('checkpoint-scan'),
                         ),
+                        const SizedBox(height: 12),
+                        _RoleCard(
+                          icon: Icons.app_registration,
+                          title: 'Register Identity (Issuer)',
+                          subtitle: 'Cryptographically sign and register an ID to the Blockchain Ledger',
+                          color: Colors.blueAccent,
+                          onTap: () => context.pushNamed('checkpoint-scan', queryParameters: {'mode': 'register'}),
+                        ),
                         const SizedBox(height: 20),
                         // Secondary links row
                         Row(

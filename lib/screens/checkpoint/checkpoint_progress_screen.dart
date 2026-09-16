@@ -1,22 +1,26 @@
-import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../widgets/pramaan_theme.dart';
 import '../../widgets/step_indicator.dart';
+import '../../services/api_service.dart';
+import 'checkpoint_result_screen.dart';
 
 class CheckpointProgressScreen extends StatefulWidget {
   final String documentId;
   final String facePhotoPath;
   final String docPhotoPath;
-  final String docunetResult;
+  final String ocrText;
+  final Map<String, dynamic> docunetResult;
 
   const CheckpointProgressScreen({
     super.key,
     required this.documentId,
     required this.facePhotoPath,
     required this.docPhotoPath,
-    required this.docunetResult,
+    this.ocrText = '',
+    this.docunetResult = const {},
   });
 
   @override
@@ -56,6 +60,7 @@ class _CheckpointProgressScreenState extends State<CheckpointProgressScreen>
     _items.addAll([
       ChecklistItem(label: 'Compiling DocuNet Report...'),
       ChecklistItem(label: 'Checking Tamper Forensics...'),
+      ChecklistItem(label: 'Validating Blockchain Ledger...'),
       ChecklistItem(label: 'Parsing Field Details...'),
       ChecklistItem(label: 'Validating Live Face...'),
       ChecklistItem(label: 'Generating Verdict...'),
@@ -79,25 +84,55 @@ class _CheckpointProgressScreenState extends State<CheckpointProgressScreen>
         throw Exception("Missing DocuNet result. Ensure network is connected.");
       }
 
-      final Map<String, dynamic> docunetMap = json.decode(widget.docunetResult);
+      final docunetMap = Map<String, dynamic>.from(widget.docunetResult);
       
       await Future.delayed(const Duration(milliseconds: 600));
       _setItem(0, true, 'Report gathered');
 
       await Future.delayed(const Duration(milliseconds: 600));
       final tamperDetection = docunetMap['tamper_detection'];
-      final bool isTampered = tamperDetection != null && tamperDetection['overall_verdict'] == 'TAMPERED';
+      final bool isTampered = tamperDetection != null && tamperDetection['is_tampered'] == true;
       _setItem(1, !isTampered, isTampered ? 'Tamper Risk Found' : 'No Tampering Detected');
 
       await Future.delayed(const Duration(milliseconds: 600));
       _setItem(2, true, 'Fields parsed successfully');
 
       await Future.delayed(const Duration(milliseconds: 600));
-      // Fake the face match since we are offline for it
-      _setItem(3, true, 'Face matches document identity (Hackathon mode)');
+      final ledgerResult = docunetMap['ledger_result'] ?? {};
+      final bool isRegistered = ledgerResult['is_registered'] == true;
+        _setItem(3, isRegistered, isRegistered
+          ? 'Cryptographic Hash Matched!'
+          : 'Document is not registered yet. Use Register Identity first.');
 
       await Future.delayed(const Duration(milliseconds: 600));
-      _setItem(4, true, 'Report Ready');
+      // Real face comparison: selfie vs ID photo
+      bool isFaceMatch = false;
+      String faceDetail = 'No photo paths provided';
+      final facePhotoExists = widget.facePhotoPath.isNotEmpty && File(widget.facePhotoPath).existsSync();
+      final docPhotoExists = widget.docPhotoPath.isNotEmpty && File(widget.docPhotoPath).existsSync();
+      if (facePhotoExists && docPhotoExists) {
+        try {
+          final faceResp = await ApiService().compareFaces(widget.docPhotoPath, widget.facePhotoPath);
+          final similarity = faceResp['similarity_percent'] ?? 0;
+          isFaceMatch = faceResp['is_match'] == true;
+          faceDetail = '$similarity% similarity (${faceResp['method'] ?? 'CV'})';
+          // Also store in docunet result for the result screen
+          docunetMap['face_result'] = faceResp;
+        } catch (e) {
+          faceDetail = 'Face comparison failed: ${e.toString().replaceFirst('Exception: ', '')}';
+          if (faceDetail.length > 90) {
+            faceDetail = '${faceDetail.substring(0, 87)}...';
+          }
+          isFaceMatch = false;
+        }
+      } else {
+        faceDetail = 'Hackathon Demo (no ID photo extracted)';
+        isFaceMatch = true; // pass for demo when no ID photo available
+      }
+      _setItem(4, isFaceMatch, faceDetail);
+
+      await Future.delayed(const Duration(milliseconds: 600));
+      _setItem(5, true, 'Report Ready');
 
       await Future.delayed(const Duration(milliseconds: 800));
 
@@ -105,15 +140,26 @@ class _CheckpointProgressScreenState extends State<CheckpointProgressScreen>
         setState(() => _done = true);
         await Future.delayed(const Duration(milliseconds: 500));
         if (mounted) {
-          context.pushReplacementNamed(
-            'checkpoint-result',
-            extra: docunetMap,
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => CheckpointResultScreen(result: docunetMap),
+            ),
           );
         }
       }
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     }
+  }
+
+  String _friendlyError(String error) {
+    if (error.contains('Missing DocuNet result')) {
+      return 'The analysis report was not received. Please scan the document again.';
+    }
+    if (error.contains('Failed to compare faces')) {
+      return 'Face comparison could not be completed. Please try the liveness check again.';
+    }
+    return 'Verification could not be completed. Please try the scan again.';
   }
 
   @override
@@ -199,9 +245,13 @@ class _CheckpointProgressScreenState extends State<CheckpointProgressScreen>
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(color: PramaanColors.riskHigh.withOpacity(0.3)),
                       ),
-                      child: Text(_error!,
-                          style: GoogleFonts.robotoMono(
-                              color: PramaanColors.riskHigh, fontSize: 13)),
+                        child: Text(
+                        _friendlyError(_error!),
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.robotoMono(
+                          color: PramaanColors.riskHigh, fontSize: 13),
+                        ),
                     ),
                     const SizedBox(height: 24),
                     ElevatedButton(

@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 import 'package:camera/camera.dart';
@@ -8,15 +7,15 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../../providers.dart';
 import '../../widgets/pramaan_theme.dart';
 import '../../services/api_service.dart';
+import 'checkpoint_face_screen.dart';
 
 class CheckpointScanScreen extends ConsumerStatefulWidget {
-  const CheckpointScanScreen({super.key});
+  final String mode; // 'register' or 'verify'
+  const CheckpointScanScreen({super.key, this.mode = 'verify'});
 
   @override
   ConsumerState<CheckpointScanScreen> createState() =>
@@ -39,9 +38,6 @@ class _CheckpointScanScreenState extends ConsumerState<CheckpointScanScreen>
 
   bool _isSendingFrame = false;
   
-  final TextRecognizer _textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
-  bool _isScanningText = false;
-
   @override
   void initState() {
     super.initState();
@@ -54,26 +50,79 @@ class _CheckpointScanScreenState extends ConsumerState<CheckpointScanScreen>
     _initCamera();
   }
 
-  void _handleDocuNetResult(Map<String, dynamic> response) async {
+  Future<void> _handleDocuNetResult(Map<String, dynamic> response, String imagePath) async {
     if (response['success'] == true) {
       final parsedDoc = response['document'];
-      final fullText = parsedDoc?['raw_text'] ?? '';
-      
-      setState(() { _statusMsg = 'Scan complete — proceeding'; _isProcessing = false; _matched = true; });
+      final fullText = parsedDoc is Map ? (parsedDoc['raw_text'] ?? '').toString() : '';
 
-      HapticFeedback.heavyImpact();
-      await Future.delayed(const Duration(milliseconds: 700));
-      if (!mounted) return;
+      if (widget.mode == 'register') {
+        // REGISTRATION: send image to backend so the SAME OCR pipeline
+        // computes the hash — guarantees matching during verification.
+        try {
+          setState(() { _statusMsg = 'Registering to Blockchain...'; });
+          final aadhaarValue = ((response['document'] as Map?)?['fields'] as Map?)?['aadhaar_number'];
+          final identityKey = aadhaarValue is Map
+              ? (aadhaarValue['value']?.toString() ?? '').replaceAll(RegExp(r'\D'), '')
+              : '';
+          final regResp = await ApiService().registerFromImage(
+            imagePath,
+            identityKey: identityKey,
+          );
+          if (mounted) {
+            final alreadyExisted = regResp['already_existed'] == true;
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(alreadyExisted
+                  ? '⚠️ This ID is already in the Blockchain Ledger!'
+                  : '✅ Identity registered to Blockchain!'),
+              backgroundColor: alreadyExisted ? Colors.orange : PramaanColors.pass,
+            ));
+            context.go('/');
+          }
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('❌ Registration failed: $e'),
+              backgroundColor: PramaanColors.riskHigh,
+            ));
+            context.go('/');
+          }
+        }
+        return;
+      } else {
+        // VERIFICATION: The backend verify_from_image endpoint already computes the pHash 
+        // and checks the ledger. We just pass the response through.
+        setState(() { _statusMsg = 'Scan complete — proceeding'; _isProcessing = false; _matched = true; });
+        HapticFeedback.heavyImpact();
+        await Future.delayed(const Duration(milliseconds: 700));
+        if (!mounted) return;
 
-      final docId = 'scan_${DateTime.now().millisecondsSinceEpoch}';
-      _goFace(docId, fullText, '', json.encode(response));
+        final docId = 'scan_${DateTime.now().millisecondsSinceEpoch}';
+        final stableImagePath = '${Directory.systemTemp.path}/pramaan_$docId.jpg';
+        await File(imagePath).copy(stableImagePath);
+        VerificationSession.start(
+          id: docId,
+          text: fullText,
+          photoPath: stableImagePath,
+          report: response,
+        );
+        debugPrint('DocuNet response accepted; opening liveness screen');
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => CheckpointFaceScreen(
+              documentId: docId,
+              ocrText: fullText,
+              docPhotoPath: stableImagePath,
+              docunetResult: response,
+            ),
+          ),
+        );
+      }
     } else {
       setState(() {
         _statusMsg = 'DocuNet failed: ${response['error_message'] ?? 'Unknown error'}';
         _isError = true;
         _isProcessing = false;
       });
-      // Restart processing after a delay
       await Future.delayed(const Duration(seconds: 2));
       if (mounted) setState(() => _isProcessing = false);
     }
@@ -96,23 +145,23 @@ class _CheckpointScanScreenState extends ConsumerState<CheckpointScanScreen>
         (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cameras.first,
       );
-      // Medium resolution looks good enough without being too huge for ML kit
+      // Use a high-resolution still capture so Aadhaar text survives cropping/OCR.
       final ctrl = CameraController(
         back, 
-        ResolutionPreset.medium, 
+        ResolutionPreset.high,
         enableAudio: false,
-        imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888,
+        imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.yuv420 : ImageFormatGroup.bgra8888,
       );
       await ctrl.initialize();
       if (!mounted) { ctrl.dispose(); return; }
       setState(() { _camCtrl = ctrl; _camReady = true; _camError = null; });
+      try {
+        await ctrl.setFocusMode(FocusMode.auto);
+        await ctrl.setExposureMode(ExposureMode.auto);
+      } catch (e) {
+        debugPrint('Camera auto focus/exposure unavailable: $e');
+      }
       
-      // Start live text detection stream
-      _camCtrl!.startImageStream((CameraImage image) {
-        if (!_isProcessing && !_isSendingFrame && !_matched && !_isScanningText) {
-          _scanForDocument(image, back.sensorOrientation);
-        }
-      });
     } catch (e) {
       if (mounted) setState(() => _camError = 'Camera error: $e');
     }
@@ -125,117 +174,80 @@ class _CheckpointScanScreenState extends ConsumerState<CheckpointScanScreen>
         _camCtrl!.stopImageStream();
       }
     } catch (_) {}
-    _textRecognizer.close();
     _camCtrl?.dispose();
     _pulseCtrl.dispose();
     super.dispose();
-  }
-
-  Future<void> _scanForDocument(CameraImage image, int sensorOrientation) async {
-    _isScanningText = true;
-    try {
-      final WriteBuffer allBytes = WriteBuffer();
-      for (final Plane plane in image.planes) {
-        allBytes.putUint8List(plane.bytes);
-      }
-      final bytes = allBytes.done().buffer.asUint8List();
-
-      final Size imageSize = Size(image.width.toDouble(), image.height.toDouble());
-      final imageRotation = InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation0deg;
-      final inputImageFormat = InputImageFormatValue.fromRawValue(image.format.raw) ?? InputImageFormat.nv21;
-
-      final inputImageData = InputImageMetadata(
-        size: imageSize,
-        rotation: imageRotation,
-        format: inputImageFormat,
-        bytesPerRow: image.planes.isNotEmpty ? image.planes[0].bytesPerRow : 0,
-      );
-
-      final inputImage = InputImage.fromBytes(bytes: bytes, metadata: inputImageData);
-      final recognizedText = await _textRecognizer.processImage(inputImage);
-
-      if (!mounted) return;
-
-      // If we see at least 5 blocks of text, it's highly likely a document
-      if (recognizedText.blocks.length >= 5) {
-        setState(() {
-          _statusMsg = "Document Detected. Capturing...";
-        });
-        HapticFeedback.selectionClick();
-        _captureAndVerify();
-      } else {
-        if (_statusMsg != "Hold steady for automatic capture") {
-          setState(() {
-             _statusMsg = "No Document Detected";
-             _isError = false;
-          });
-        }
-      }
-    } catch (e) {
-      debugPrint("Live scan error: $e");
-    } finally {
-      if (mounted) _isScanningText = false;
-    }
   }
 
   Future<void> _captureAndVerify() async {
     if (_isProcessing || _camCtrl == null || !_camReady || _isSendingFrame || _matched) return;
     
     _isSendingFrame = true;
+    String? imagePath;
     try {
-      // Must stop stream before taking a high-res picture
-      await _camCtrl!.stopImageStream();
-      
-      // Samsung devices take 2-4 seconds to execute takePicture
+      if (_camCtrl!.value.isStreamingImages) {
+        await _camCtrl!.stopImageStream();
+      }
       final xfile = await _camCtrl!.takePicture().timeout(const Duration(seconds: 5));
+      imagePath = xfile.path;
       
-      final api = ApiService();
-      // Generous timeout to allow for model inference on first run
-      final response = await api.verifyDocument(xfile.path).timeout(const Duration(seconds: 15));
-      
-      File(xfile.path).delete().ignore();
+      if (mounted) setState(() { _statusMsg = 'Connecting to DocuNet...'; });
 
+      final api = ApiService();
+      if (mounted) setState(() { _statusMsg = 'Running OCR and forensic analysis...'; });
+      final response = await api.verifyFromImage(imagePath).timeout(const Duration(seconds: 90));
+      
       if (response['success'] == true) {
-         _handleDocuNetResult(response);
+        if (mounted) setState(() { _statusMsg = 'Analysing results...'; });
+        await _handleDocuNetResult(response, imagePath);
       } else {
-         if (mounted) {
-           setState(() {
-             _isError = true;
-             _statusMsg = response['error_message'] ?? 'Adjust document...';
-           });
-         }
+        if (mounted) setState(() {
+          _isError = true;
+          _statusMsg = _shortStatus(
+            response['error_message']?.toString() ?? 'Backend failed. Try again.',
+          );
+        });
+        _deleteCapture(imagePath);
       }
     } on TimeoutException {
-      if (mounted) setState(() { _isError = true; _statusMsg = "Connection or Camera timeout"; });
-      _resumeStream();
+      if (mounted) setState(() { _isError = true; _statusMsg = "Timeout — backend too slow. Try again."; });
+      _deleteCapture(imagePath);
     } catch (e) {
-      if (mounted) setState(() { _isError = true; _statusMsg = "Backend Error: Server overloaded"; });
-      _resumeStream();
+      debugPrint('Document verification failed: $e');
+      if (mounted) {
+        setState(() {
+          _isError = true;
+          _statusMsg = _friendlyVerificationError(e);
+        });
+      }
+      _deleteCapture(imagePath);
     } finally {
       if (mounted) _isSendingFrame = false;
     }
   }
 
-  void _resumeStream() async {
-    if (!mounted || _camCtrl == null || _matched) return;
-    try {
-      await Future.delayed(const Duration(seconds: 1));
-      if (!mounted) return;
-      final back = (await availableCameras()).firstWhere((c) => c.lensDirection == CameraLensDirection.back);
-      _camCtrl!.startImageStream((CameraImage image) {
-        if (!_isProcessing && !_isSendingFrame && !_matched && !_isScanningText) {
-          _scanForDocument(image, back.sensorOrientation);
-        }
-      });
-    } catch (e) {
-      debugPrint("Could not resume stream: $e");
-    }
+  void _deleteCapture(String? path) {
+    if (path == null) return;
+    File(path).delete().ignore();
   }
 
-  void _goFace(String docId, String ocrText, String docImagePath, [String docunetResult = '']) {
-    context.pushReplacementNamed('checkpoint-face', queryParameters: {
-      'docId': docId, 'ocrText': ocrText, 'docPhoto': docImagePath, 'docunetResult': docunetResult
-    });
+  String _shortStatus(String message) {
+    return message;
+  }
+
+  String _friendlyVerificationError(Object error) {
+    final message = error.toString();
+    if (message.contains('Cannot reach backend')) {
+      return 'Cannot reach backend. Check USB reverse or API_BASE_URL.';
+    }
+    if (message.contains('Backend did not respond') ||
+        message.contains('TimeoutException')) {
+      return 'Backend timed out. Try the scan again.';
+    }
+    if (message.contains('Server error')) {
+      return _shortStatus(message.replaceFirst('Exception: ', ''));
+    }
+    return _shortStatus(message.replaceFirst('Exception: ', ''));
   }
 
   @override
@@ -388,6 +400,8 @@ class _CheckpointScanScreenState extends ConsumerState<CheckpointScanScreen>
                           Expanded(
                             child: Text(
                               _statusMsg ?? 'Scanning Document...',
+                                maxLines: 10,
+                                overflow: TextOverflow.visible,
                               textAlign: TextAlign.center,
                               style: GoogleFonts.rajdhani(
                                 fontSize: 20,
@@ -403,12 +417,44 @@ class _CheckpointScanScreenState extends ConsumerState<CheckpointScanScreen>
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
+                      if (_isSendingFrame) ...[
+                        const SizedBox(height: 4),
+                        const SizedBox(
+                          width: 24, height: 24,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: PramaanColors.primaryLight),
+                        ),
+                        const SizedBox(height: 6),
+                      ],
                       Text(
-                        _isProcessing ? "Processing via DocuNet..." : "Hold steady for automatic capture",
+                        _isSendingFrame
+                          ? _statusMsg ?? 'Sending to DocuNet AI...'
+                          : _isProcessing ? "Processing via DocuNet..." : "Position the Aadhaar card inside the frame",
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.roboto(
-                          color: Colors.white60,
+                          color: _isSendingFrame ? PramaanColors.primaryLight : Colors.white60,
                           fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 48,
+                        child: ElevatedButton.icon(
+                          onPressed: (!_camReady || _isSendingFrame || _matched)
+                              ? null
+                              : _captureAndVerify,
+                          icon: const Icon(Icons.camera_alt_outlined),
+                          label: Text(
+                            _isSendingFrame ? 'ANALYSING DOCUMENT...' : 'CAPTURE DOCUMENT',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: PramaanColors.primary,
+                            foregroundColor: Colors.white,
+                            disabledBackgroundColor: Colors.white24,
+                          ),
                         ),
                       ),
                     ],

@@ -75,9 +75,9 @@ class ELAConfig:
 @dataclass(frozen=True, slots=True)
 class OCRConfig:
 
-    engine: str = "paddleocr"
-    fallback_engine: str = "easyocr"
-    confidence_threshold: float = 0.6
+    engine: str = "easyocr"
+    fallback_engine: str = "paddleocr"
+    confidence_threshold: float = 0.3
     languages: list = field(default_factory=lambda: ["en"])
     use_gpu: bool = False
     paddle_det_model: str = "en_PP-OCRv4_det"

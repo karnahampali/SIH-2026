@@ -36,5 +36,12 @@ ipconfig | findstr "IPv4"
 echo.
 echo.
 
+REM Allow a USB-connected Android phone to reach this laptop's API.
+set "ADB_EXE=%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"
+if exist "%ADB_EXE%" (
+    "%ADB_EXE%" reverse tcp:8000 tcp:8000 >nul 2>&1
+    echo Android USB reverse tunnel configured: http://127.0.0.1:8000
+)
+
 py -m uvicorn src.api.server:app --host 0.0.0.0 --port 8000 --reload
 pause

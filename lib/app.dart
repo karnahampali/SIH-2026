@@ -8,6 +8,7 @@ import 'screens/checkpoint/checkpoint_result_screen.dart';
 import 'screens/tamper/tamper_demo_screen.dart';
 import 'screens/history/scan_history_screen.dart';
 import 'screens/about/about_screen.dart';
+import 'services/api_service.dart';
 
 class AppRouter {
   static final router = GoRouter(
@@ -23,31 +24,33 @@ class AppRouter {
       GoRoute(
         path: '/checkpoint/scan',
         name: 'checkpoint-scan',
-        builder: (_, __) => const CheckpointScanScreen(),
+        builder: (_, state) {
+          final mode = state.uri.queryParameters['mode'] ?? 'verify';
+          return CheckpointScanScreen(mode: mode);
+        },
       ),
       GoRoute(
         path: '/checkpoint/face',
         name: 'checkpoint-face',
         builder: (_, state) {
-          final docId = state.uri.queryParameters['docId'] ?? '';
-          final docunetResult = state.uri.queryParameters['docunetResult'] ?? '';
-          return CheckpointFaceScreen(documentId: docId, docunetResult: docunetResult);
+          return CheckpointFaceScreen(
+            documentId: VerificationSession.documentId,
+            ocrText: VerificationSession.ocrText,
+            docPhotoPath: VerificationSession.documentPhotoPath,
+            docunetResult: VerificationSession.result,
+          );
         },
       ),
       GoRoute(
         path: '/checkpoint/progress',
         name: 'checkpoint-progress',
         builder: (_, state) {
-          final docId = state.uri.queryParameters['docId'] ?? '';
-          final facePhoto = state.uri.queryParameters['livePhoto'] ?? '';
-          final docPhoto = state.uri.queryParameters['docPhoto'] ?? '';
-          final docunetResult = state.uri.queryParameters['docunetResult'] ?? '';
-          
           return CheckpointProgressScreen(
-            documentId: docId,
-            facePhotoPath: facePhoto,
-            docPhotoPath: docPhoto,
-            docunetResult: docunetResult,
+            documentId: VerificationSession.documentId,
+            facePhotoPath: VerificationSession.facePhotoPath,
+            docPhotoPath: VerificationSession.documentPhotoPath,
+            ocrText: VerificationSession.ocrText,
+            docunetResult: VerificationSession.result,
           );
         },
       ),

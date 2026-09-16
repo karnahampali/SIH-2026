@@ -1,6 +1,7 @@
 """Multi-engine OCR text extraction with confidence-based fallback."""
 
 import cv2
+import json
 import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -68,10 +69,20 @@ class PaddleOCREngine(BaseOCREngine):
                 from paddleocr import PaddleOCR
                 import logging as _logging
                 _logging.getLogger("ppocr").setLevel(_logging.WARNING)
-                self._engine = PaddleOCR(
-                    use_textline_orientation=True,
-                    lang="en",
-                )
+                try:
+                    self._engine = PaddleOCR(
+                        use_textline_orientation=True,
+                        lang="en",
+                        enable_mkldnn=False,
+                    )
+                except TypeError:
+                    # PaddleOCR 2.x uses the older angle-classifier options.
+                    self._engine = PaddleOCR(
+                        use_angle_cls=True,
+                        lang="en",
+                        show_log=False,
+                        enable_mkldnn=False,
+                    )
                 logger.info("PaddleOCR engine loaded successfully")
             except ImportError:
                 logger.error(
@@ -83,14 +94,21 @@ class PaddleOCREngine(BaseOCREngine):
         """Run PaddleOCR on the image."""
         self._load_engine()
 
-        results = self._engine.predict(image)
+        if hasattr(self._engine, "predict"):
+            results = self._engine.predict(image)
+        else:
+            # PaddleOCR 2.x exposes `ocr`, while 3.x exposes `predict`.
+            results = self._engine.ocr(image, cls=True)
 
         boxes = []
         if results:
             for page in results:
-                texts = page.get("rec_texts", [])
-                scores = page.get("rec_scores", [])
-                polys = page.get("rec_polys", page.get("dt_polys", []))
+                page_data = _result_to_dict(page)
+                if not page_data:
+                    page_data = _legacy_result_to_dict(page)
+                texts = page_data.get("rec_texts", [])
+                scores = page_data.get("rec_scores", [])
+                polys = page_data.get("rec_polys", page_data.get("dt_polys", []))
 
                 for text, score, poly in zip(texts, scores, polys):
                     confidence = float(score)
@@ -110,7 +128,7 @@ class PaddleOCREngine(BaseOCREngine):
                         engine="paddleocr",
                     ))
 
-        full_text = " ".join(b.text for b in boxes)
+        full_text = _boxes_to_lines(boxes)
         avg_conf = np.mean([b.confidence for b in boxes]) if boxes else 0.0
 
         logger.info(
@@ -123,6 +141,47 @@ class PaddleOCREngine(BaseOCREngine):
             avg_confidence=float(avg_conf),
             engine_used="paddleocr",
         )
+
+
+def _result_to_dict(result: object) -> dict:
+    """Normalize PaddleOCR 2.x dictionaries and 3.x result objects."""
+    if isinstance(result, dict):
+        data = result
+    else:
+        data = getattr(result, "json", None)
+        if callable(data):
+            data = data()
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                data = None
+        if not isinstance(data, dict):
+            converter = getattr(result, "to_dict", None)
+            data = converter() if callable(converter) else {}
+
+    if isinstance(data, dict) and isinstance(data.get("res"), dict):
+        return data["res"]
+    return data if isinstance(data, dict) else {}
+
+
+def _legacy_result_to_dict(result: object) -> dict:
+    """Convert PaddleOCR 2.x's nested `[box, (text, score)]` output."""
+    if not isinstance(result, list):
+        return {}
+    texts = []
+    scores = []
+    polygons = []
+    for item in result:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        polygon, recognition = item
+        if not isinstance(recognition, (list, tuple)) or len(recognition) != 2:
+            continue
+        polygons.append(polygon)
+        texts.append(recognition[0])
+        scores.append(recognition[1])
+    return {"rec_texts": texts, "rec_scores": scores, "rec_polys": polygons}
 
 
 class EasyOCREngine(BaseOCREngine):
@@ -149,21 +208,43 @@ class EasyOCREngine(BaseOCREngine):
                 raise
 
     def extract(self, image: np.ndarray) -> OCRResult:
-        """Run EasyOCR on the image."""
+        """Run EasyOCR over several document-friendly preprocessing variants."""
         self._load_engine()
 
-        results = self._engine.readtext(image)
+        h, w = image.shape[:2]
+        scale = 2
+        upscaled = cv2.resize(image, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        adaptive = cv2.adaptiveThreshold(
+            clahe, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, 7,
+        )
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        sharpened = cv2.filter2D(upscaled, -1, kernel)
 
         boxes = []
-        for (bbox, text, confidence) in results:
-            # EasyOCR returns bbox as [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
-            bbox_int = [[int(p[0]), int(p[1])] for p in bbox]
-            boxes.append(OCRBox(
-                text=text,
-                confidence=float(confidence),
-                bbox=bbox_int,
-                engine="easyocr",
-            ))
+        for variant in (sharpened, clahe, adaptive):
+            results = self._engine.readtext(
+                variant, paragraph=False, width_ths=0.5, add_margin=0.12,
+            )
+            for bbox, text, confidence in results:
+                text = text.strip()
+                if not text:
+                    continue
+                bbox_int = [[int(p[0] / scale), int(p[1] / scale)] for p in bbox]
+                boxes.append(OCRBox(
+                    text=text, confidence=float(confidence),
+                    bbox=bbox_int, engine="easyocr",
+                ))
+
+        # Keep the strongest reading for each normalized text token.
+        best_by_text = {}
+        for box in boxes:
+            key = " ".join(box.text.lower().split())
+            if key not in best_by_text or box.confidence > best_by_text[key].confidence:
+                best_by_text[key] = box
+        boxes = list(best_by_text.values())
 
         full_text = " ".join(b.text for b in boxes)
         avg_conf = np.mean([b.confidence for b in boxes]) if boxes else 0.0
@@ -178,6 +259,26 @@ class EasyOCREngine(BaseOCREngine):
             avg_confidence=float(avg_conf),
             engine_used="easyocr",
         )
+
+
+def _boxes_to_lines(boxes: List[OCRBox]) -> str:
+    """Preserve OCR reading lines so Aadhaar labels and values remain associated."""
+    if not boxes:
+        return ""
+    lines: List[List[OCRBox]] = []
+    for box in sorted(boxes, key=lambda item: min(point[1] for point in item.bbox)):
+        y = min(point[1] for point in box.bbox)
+        line = next((candidate for candidate in lines if abs(
+            y - min(point[1] for point in candidate[0].bbox)
+        ) < 18), None)
+        if line is None:
+            lines.append([box])
+        else:
+            line.append(box)
+    return "\n".join(
+        " ".join(box.text for box in sorted(line, key=lambda item: min(point[0] for point in item.bbox)))
+        for line in lines
+    )
 
 
 class OCREngineManager:
@@ -199,43 +300,50 @@ class OCREngineManager:
         return self._engines[name]
 
     def extract(self, image: np.ndarray) -> OCRResult:
-        """Extract text using primary engine, falling back if confidence is low."""
-        # Try primary engine
+        """Extract text and only load a fallback when the primary has no result."""
+        paddle_result = OCRResult(boxes=[], full_text="", avg_confidence=0.0, engine_used="paddleocr")
+        easy_result = OCRResult(boxes=[], full_text="", avg_confidence=0.0, engine_used="easyocr")
+
+        # Try PaddleOCR
         primary = self._get_engine(self.config.engine)
         try:
-            primary_result = primary.extract(image)
-        except (RuntimeError, ValueError, OSError) as e:
+            paddle_result = primary.extract(image)
+        except Exception as e:
             logger.error(f"Primary OCR engine ({self.config.engine}) failed: {e}")
-            primary_result = OCRResult(
-                boxes=[], full_text="", avg_confidence=0.0,
-                engine_used=self.config.engine,
-            )
 
-        if primary_result.avg_confidence >= self.config.confidence_threshold:
-            return primary_result
+        if paddle_result.boxes and paddle_result.avg_confidence >= self.config.confidence_threshold:
+            return paddle_result
 
-        logger.info(
-            f"Primary OCR confidence ({primary_result.avg_confidence:.3f}) "
-            f"below threshold ({self.config.confidence_threshold}). "
-            f"Trying fallback engine: {self.config.fallback_engine}"
-        )
-
-        # Try fallback engine
+        # Load the fallback only when the primary engine did not produce a usable result.
         fallback = self._get_engine(self.config.fallback_engine)
         try:
-            fallback_result = fallback.extract(image)
-        except (RuntimeError, ValueError, OSError) as e:
+            easy_result = fallback.extract(image)
+        except Exception as e:
             logger.error(f"Fallback OCR engine ({self.config.fallback_engine}) failed: {e}")
-            return primary_result
 
-        if fallback_result.avg_confidence > primary_result.avg_confidence:
-            logger.info(
-                f"Fallback engine ({self.config.fallback_engine}) produced better result: "
-                f"{fallback_result.avg_confidence:.3f} vs {primary_result.avg_confidence:.3f}"
-            )
-            return fallback_result
+        # Merge: combine boxes from both, deduplicate by text similarity.
+        all_boxes = list(easy_result.boxes)  # EasyOCR is more reliable on Windows
+        seen_texts = {b.text.lower().strip() for b in all_boxes}
+        for box in paddle_result.boxes:
+            if box.text.lower().strip() not in seen_texts and box.confidence > 0.3:
+                all_boxes.append(box)
+                seen_texts.add(box.text.lower().strip())
 
-        return primary_result
+        if not all_boxes:
+            # Return whichever has more text
+            return paddle_result if len(paddle_result.full_text) > len(easy_result.full_text) else easy_result
+
+        full_text = " ".join(b.text for b in all_boxes)
+        avg_conf = float(np.mean([b.confidence for b in all_boxes]))
+        best_engine = "easyocr+paddleocr"
+
+        logger.info(f"Merged OCR: {len(all_boxes)} regions, avg_conf={avg_conf:.3f}")
+        return OCRResult(
+            boxes=all_boxes,
+            full_text=full_text,
+            avg_confidence=avg_conf,
+            engine_used=best_engine,
+        )
 
     def extract_with_both(self, image: np.ndarray) -> Tuple[OCRResult, OCRResult]:
         """Run both engines and return both results (for benchmarking)."""

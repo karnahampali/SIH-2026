@@ -31,16 +31,37 @@ class CheckpointResultScreen extends StatelessWidget {
     final bool isDlTampered = dlData['prediction'] == 1;
     final bool isNoiseTampered = noiseData['is_tampered'] == true;
     final bool isCopyMoveTampered = copyMoveData['is_copymove'] == true;
-    final bool isForeignId = docType != 'aadhaar' && docType != 'pan';
+    final bool isForeignId = docType != 'aadhaar' && docType != 'pan' && docType != 'unknown';
+    
+    final ledgerData = apiResult['ledger_result'] ?? {};
+    final bool isRegistered = ledgerData['is_registered'] == true;
+    final bool fieldsMatch = ledgerData['fields_match'] != false;
+    final bool isLedgerFailed = !isRegistered || !fieldsMatch;
 
-    final bool isTampered = isElaTampered || isDlTampered || isNoiseTampered || isCopyMoveTampered || isForeignId;
+    // Face comparison result
+    final faceData = apiResult['face_result'] ?? {};
+    final bool isFaceMatch = faceData.isEmpty ? true : (faceData['is_match'] == true);
+    final double faceSimPct = (faceData['similarity_percent'] ?? 0).toDouble();
+    final String faceMethod = faceData['method'] ?? '';
+    final bool isFaceMismatch = faceData.isNotEmpty && !isFaceMatch;
+
+    // Only hard-fail on actual forensic tampering or blockchain mismatch
+    final bool isTampered = isElaTampered || isDlTampered || isCopyMoveTampered || isLedgerFailed || isFaceMismatch;
     final verdict = isTampered ? 'FAIL' : 'PASS';
 
     Color verdictColor = isTampered ? PramaanColors.riskHigh : PramaanColors.pass;
     IconData verdictIcon = isTampered ? Icons.cancel_rounded : Icons.check_circle_rounded;
-    
-    // Simulate a risk score since DocuNet doesn't provide a direct 0-100 score
-    final riskScore = isTampered ? 85 : 15;
+
+    // Calculate risk score from actual forensic signals
+    int riskScore = 0;
+    if (isElaTampered) riskScore += 30;
+    if (isDlTampered) riskScore += 25;
+    if (isNoiseTampered) riskScore += 15;
+    if (isCopyMoveTampered) riskScore += 20;
+    if (isLedgerFailed) riskScore += 35;
+    if (isFaceMismatch) riskScore += 30;
+    if (isForeignId) riskScore += 10;
+    riskScore = riskScore.clamp(0, 100);
 
     final fields = parsedDoc['fields'] ?? {};
 
@@ -106,7 +127,12 @@ class CheckpointResultScreen extends StatelessWidget {
               child: Column(
                 children: [
                   _fieldRow('Document Type', docType),
-                  ...fields.entries.map((e) => _fieldRow(e.key.toString().toUpperCase(), e.value.toString())),
+                  ...fields.entries.map((e) {
+                    // Each field is {value: ..., confidence: ...} — extract just the value string
+                    final rawVal = e.value;
+                    final displayVal = (rawVal is Map) ? (rawVal['value']?.toString() ?? '-') : rawVal.toString();
+                    return _fieldRow(e.key.toString().toUpperCase().replaceAll('_', ' '), displayVal);
+                  }),
                 ],
               ),
             ),
@@ -129,12 +155,12 @@ class CheckpointResultScreen extends StatelessWidget {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: PramaanColors.pass.withOpacity(0.1),
+                      color: (isFaceMismatch ? PramaanColors.riskHigh : PramaanColors.pass).withOpacity(0.1),
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
-                      Icons.face,
-                      color: PramaanColors.pass,
+                      isFaceMismatch ? Icons.no_accounts : Icons.face,
+                      color: isFaceMismatch ? PramaanColors.riskHigh : PramaanColors.pass,
                     ),
                   ),
                   const SizedBox(width: 16),
@@ -147,9 +173,62 @@ class CheckpointResultScreen extends StatelessWidget {
                                 color: Colors.white, fontWeight: FontWeight.w600)),
                         const SizedBox(height: 4),
                         Text(
-                            'Identity Confirmed (98% Match - Hackathon Demo)',
+                          faceData.isEmpty
+                              ? 'No ID photo extracted for comparison'
+                              : isFaceMatch
+                                  ? '${faceSimPct.toStringAsFixed(1)}% similarity — Match! ${faceMethod.isNotEmpty ? "($faceMethod)" : ""}'
+                                  : '${faceSimPct.toStringAsFixed(1)}% similarity — MISMATCH ${faceMethod.isNotEmpty ? "($faceMethod)" : ""}',
+                          style: GoogleFonts.roboto(
+                              color: isFaceMismatch ? PramaanColors.riskHigh : PramaanColors.pass,
+                              fontSize: 13)),
+                      ],
+                    ),
+                  )
+                ],
+              ),
+            ),
+            // Blockchain Match
+            Text('BLOCKCHAIN LEDGER',
+                style: GoogleFonts.rajdhani(
+                    fontSize: 18, color: Colors.white54, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.03),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.white10),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: isRegistered ? PramaanColors.pass.withOpacity(0.1) : PramaanColors.riskHigh.withOpacity(0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      isRegistered ? Icons.link : Icons.link_off,
+                      color: isRegistered ? PramaanColors.pass : PramaanColors.riskHigh,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Cryptographic Hash Verification',
                             style: GoogleFonts.roboto(
-                                color: PramaanColors.pass,
+                                color: Colors.white, fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 4),
+                        Text(
+                            !isRegistered
+                              ? 'Not registered - register this ID before verification'
+                              : !fieldsMatch
+                                ? 'Identity fields changed - possible document edit'
+                                : 'Valid - Matched in Blockchain Ledger',
+                            style: GoogleFonts.roboto(
+                                color: isRegistered ? PramaanColors.pass : PramaanColors.riskHigh,
                                 fontSize: 13)),
                       ],
                     ),

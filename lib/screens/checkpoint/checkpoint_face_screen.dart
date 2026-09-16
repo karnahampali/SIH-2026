@@ -9,6 +9,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../widgets/pramaan_theme.dart';
+import '../../services/api_service.dart';
+import 'checkpoint_progress_screen.dart';
 
 enum LivenessState {
   searching, // Looking for a face
@@ -21,14 +23,14 @@ class CheckpointFaceScreen extends StatefulWidget {
   final String documentId;
   final String ocrText;
   final String docPhotoPath;
-  final String docunetResult;
+  final Map<String, dynamic> docunetResult;
 
   const CheckpointFaceScreen({
     super.key,
     required this.documentId,
     this.ocrText = '',
     this.docPhotoPath = '',
-    this.docunetResult = '',
+    this.docunetResult = const {},
   });
 
   @override
@@ -242,6 +244,7 @@ class _CheckpointFaceScreenState extends State<CheckpointFaceScreen> with Single
       // Take a high quality picture now that liveness is verified
       final xfile = await _camCtrl!.takePicture();
       _capturedFacePath = xfile.path;
+        VerificationSession.facePhotoPath = _capturedFacePath ?? '';
     } catch (e) {
       debugPrint("Error taking final picture: $e");
     }
@@ -249,15 +252,16 @@ class _CheckpointFaceScreenState extends State<CheckpointFaceScreen> with Single
     await Future.delayed(const Duration(seconds: 1));
     if (!mounted) return;
     
-    context.pushReplacementNamed(
-      'checkpoint-progress',
-      queryParameters: {
-        'docId': widget.documentId,
-        'livePhoto': _capturedFacePath ?? '',
-        'ocrText': widget.ocrText,
-        'docPhoto': widget.docPhotoPath,
-        'docunetResult': widget.docunetResult,
-      },
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => CheckpointProgressScreen(
+          documentId: widget.documentId,
+          facePhotoPath: _capturedFacePath ?? '',
+          docPhotoPath: widget.docPhotoPath,
+          ocrText: widget.ocrText,
+          docunetResult: widget.docunetResult,
+        ),
+      ),
     );
   }
 
@@ -430,7 +434,7 @@ class _CheckpointFaceScreenState extends State<CheckpointFaceScreen> with Single
                   children: [
                     IconButton(
                       icon: const Icon(Icons.arrow_back, color: Colors.white),
-                      onPressed: () => context.go('/checkpoint'),
+                      onPressed: () => context.go('/'),
                     ),
                     Text(
                       'BIOMETRIC CAPTURE',
