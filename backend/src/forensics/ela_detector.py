@@ -50,7 +50,7 @@ class ELADetector:
         suspicious_regions = self._find_suspicious_regions(ela_map)
         heatmap = self._generate_heatmap(ela_map)
 
-        is_tampered = anomaly_score > self.config.anomaly_threshold
+        is_tampered = bool(anomaly_score > self.config.anomaly_threshold)
 
         message = (
             f"Tamper DETECTED (score: {anomaly_score:.3f}). "

@@ -249,6 +249,8 @@ class DocuNetPipeline:
 
                 t0 = time.time()
                 parsed = self.field_parser.parse(ocr_result)
+                logger.info(f"RAW OCR TEXT:\n{parsed.raw_text}")
+                logger.info(f"UNMATCHED TEXT: {parsed.unmatched_text}")
                 result.timings["field_parsing"] = (time.time() - t0) * 1000
                 result.parsed_document = parsed
                 result.stage_reached = "field_parsing"

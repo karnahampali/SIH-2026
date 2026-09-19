@@ -174,7 +174,11 @@ def encode_image_base64(image: np.ndarray, format: str = ".jpg") -> str:
 
 
 def _json_safe(value):
-    """Replace NaN/Infinity values that strict mobile JSON decoders reject."""
+    """Replace NaN/Infinity values and coerce numpy scalar types to native
+    Python types, since numpy 2.x's np.bool/np.int64/np.float64 are not
+    JSON-serializable even though they look like plain bool/int/float."""
+    if isinstance(value, np.generic):
+        value = value.item()
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
@@ -232,7 +236,7 @@ async def ela_analysis(file: UploadFile = File(...)):
     if "ela_overlay" in result.images:
         response["overlay_base64"] = encode_image_base64(result.images["ela_overlay"])
 
-    return JSONResponse(content=response)
+    return JSONResponse(content=_json_safe(response))
 
 
 @app.post("/api/v1/batch")
@@ -258,7 +262,7 @@ async def batch_verify(files: List[UploadFile] = File(...)):
                 "error": str(e),
             })
 
-    return JSONResponse(content={"results": results, "total": len(results)})
+    return JSONResponse(content=_json_safe({"results": results, "total": len(results)}))
 
 
 class RegisterIdentityRequest(BaseModel):
@@ -273,7 +277,7 @@ async def register_identity_endpoint(req: RegisterIdentityRequest):
     """Register a new identity hash into the blockchain ledger."""
     success = ledger_db.register_identity(req.document_hash, req.issuer_signature)
     if success:
-        return JSONResponse(content={"success": True, "message": "Identity registered to ledger"})
+       return JSONResponse(content=_json_safe({"success": True, "message": "Identity registered to ledger"}))
     else:
         raise HTTPException(status_code=400, detail="Failed to register identity or already exists")
 
@@ -281,7 +285,7 @@ async def register_identity_endpoint(req: RegisterIdentityRequest):
 async def verify_identity_hash_endpoint(req: VerifyIdentityRequest):
     """Verify if an identity hash exists in the blockchain ledger."""
     result = ledger_db.verify_identity(req.document_hash)
-    return JSONResponse(content={"success": True, "ledger_result": result})
+    return JSONResponse(content=_json_safe({"success": True, "ledger_result": result}))
 
 
 @app.post("/api/v1/register_from_image")
@@ -310,12 +314,12 @@ async def register_from_image_endpoint(
     )
 
     logger.info(f"register_from_image (pHash): hash={document_hash[:16]}... already_existed={already_exists}")
-    return JSONResponse(content={
-        "success": True,
-        "document_hash": document_hash,
-        "already_existed": already_exists,
-        "method": "perceptual_hash",
-    })
+    return JSONResponse(content=_json_safe({
+    "success": True,
+    "document_hash": document_hash,
+    "already_existed": already_exists,
+    "method": "perceptual_hash",
+}))
 
 
 @app.post("/api/v1/verify_from_image")
@@ -423,13 +427,12 @@ async def compare_faces_endpoint(
         method = "OpenCV/PortraitFeatures"
 
     logger.info(f"Face compare: similarity={similarity}% match={is_match} method={method}")
-    return JSONResponse(content={
-        "success": True,
-        "similarity_percent": similarity,
-        "is_match": is_match,
-        "method": method,
-    })
-
+    return JSONResponse(content=_json_safe({
+    "success": True,
+    "similarity_percent": similarity,
+    "is_match": is_match,
+    "method": method,
+}))
 
 @app.websocket("/ws/live-capture")
 async def live_capture(websocket: WebSocket):
